@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>MrX</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap"/>
+  <style>
+    *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+    html,body,#root{height:100%;width:100%;overflow:hidden;background:#000;
+      font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      -webkit-font-smoothing:antialiased}
+    body{-webkit-user-select:none;user-select:none}
+    *{-webkit-tap-highlight-color:transparent;-webkit-overflow-scrolling:touch}
+    button{-webkit-user-select:none;user-select:none}
+    /* ── Mega smooth button animations ── */
+    button, [role="button"], .tap-target {
+      -webkit-tap-highlight-color: transparent;
+      transform-origin: center;
+      transition:
+        transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+        opacity   0.18s ease,
+        box-shadow 0.22s ease,
+        background 0.22s ease,
+        border-color 0.22s ease !important;
+      will-change: transform;
+    }
+    button:active, [role="button"]:active {
+      transform: scale(0.88) !important;
+      opacity: 0.78 !important;
+      transition:
+        transform 0.08s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+        opacity   0.08s ease !important;
+    }
+    /* Round icon buttons — stronger press feel */
+    button[style*="border-radius:\"50%\""]:active,
+    button[style*="borderRadius:\"50%\""]:active {
+      transform: scale(0.82) !important;
+    }
+    /* Ripple layer on every tap */
+    button { position: relative; overflow: hidden; }
+    button::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background: radial-gradient(circle at center, rgba(255,255,255,0.18) 0%, transparent 70%);
+      opacity: 0;
+      transform: scale(0);
+      transition: transform 0.4s ease, opacity 0.4s ease;
+      pointer-events: none;
+    }
+    button:active::after {
+      transform: scale(2.5);
+      opacity: 1;
+      transition: transform 0s, opacity 0s;
+    }
+    input::placeholder,textarea::placeholder{color:rgba(158,158,158,0.5)}
+    ::-webkit-scrollbar{width:2px}
+    ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.1);border-radius:2px}
+
+    /* Splash — скрыт, App.jsx сам рисует сплэш */
+    #splash{display:none!important}
+
+    /* All animations */
+    @keyframes pageSlideIn{from{opacity:0;transform:translateX(32px)}to{opacity:1;transform:none}}
+    @keyframes msgIn{0%{opacity:0;transform:translateY(8px) scale(.95)}60%{transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:none}}
+    @keyframes bounceIn{0%{opacity:0;transform:scale(.3)}60%{transform:scale(1.1)}100%{opacity:1;transform:scale(1)}}
+    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+    @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+    @keyframes listIn{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:none}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes ripple{0%{transform:scale(1);opacity:.5}100%{transform:scale(1.8);opacity:0}}
+    @keyframes popIn{from{opacity:0;transform:scale(.35)}to{opacity:1;transform:scale(1)}}
+    @keyframes circleExpandIn{0%{opacity:0;transform:scale(.3)}60%{transform:scale(1.05)}100%{opacity:1;transform:scale(1)}}
+    @keyframes splashRing{from{transform:scale(.85);opacity:.8}to{transform:scale(1.25);opacity:0}}
+    @keyframes bottomNavIn{from{transform:translateY(100%)}to{transform:none}}
+    @keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(-16px) scale(.92)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+    @keyframes glassOrb1{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(60px,-40px) scale(1.15)}66%{transform:translate(-40px,50px) scale(.9)}}
+    @keyframes glassOrb2{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(-70px,30px) scale(.85)}66%{transform:translate(50px,-60px) scale(1.2)}}
+    @keyframes scalePress{from{transform:scale(1)}to{transform:scale(.94)}}
+    @keyframes btnPop{0%{transform:scale(0.88);opacity:0.78}60%{transform:scale(1.06)}100%{transform:scale(1);opacity:1}}
+    @keyframes softGlow{0%,100%{box-shadow:0 0 0 0 rgba(229,57,53,0)}50%{box-shadow:0 0 18px 4px rgba(229,57,53,0.35)}}
+    @keyframes tapFeedback{0%{transform:scale(1)}30%{transform:scale(0.87)}70%{transform:scale(1.04)}100%{transform:scale(1)}}
+
+    /* ── Toggle switch ── */
+    .rmg-toggle{
+      width:50px;height:28px;border-radius:14px;
+      position:relative;flex-shrink:0;cursor:pointer;
+      border:1.5px solid rgba(255,255,255,0.12);
+      background:#333;
+      box-shadow:none;
+      transition:background 0.3s cubic-bezier(0.34,1.56,0.64,1),
+                 border-color 0.3s ease,
+                 box-shadow 0.3s ease;
+    }
+    .rmg-toggle.on{
+      background:#E53935;
+      border-color:#E53935;
+      box-shadow:0 0 10px rgba(229,57,53,0.45);
+    }
+    .rmg-toggle-thumb{
+      position:absolute;
+      top:3px;left:3px;
+      width:20px;height:20px;
+      border-radius:50%;
+      background:#fff;
+      box-shadow:0 2px 6px rgba(0,0,0,0.35);
+      transition:transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+      transform:translateX(0px);
+    }
+    .rmg-toggle.on .rmg-toggle-thumb{
+      transform:translateX(22px);
+    }
+  </style>
+</head>
+<body>
+  <div id="splash">
+    <div class="sl">M</div>
+    <div class="sn">MrX</div>
+    <div class="sd"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+  </div>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+  <script>
+    window.__hideSplash=function(){
+      const s=document.getElementById('splash');
+      if(s){s.classList.add('hide');setTimeout(()=>s.remove(),350);}
+    };
+    setTimeout(()=>window.__hideSplash?.(),4000);
+
+    // ── Global tap animation — fires on EVERY button/div touch ──────────────
+    function getAnimTarget(el){
+      let cur=el;
+      for(let i=0;i<5;i++){
+        if(!cur)return null;
+        const tag=cur.tagName;
+        // Только реальные кнопки — не div-ы со скроллом
+        if(tag==='BUTTON'||tag==='A')return cur;
+        cur=cur.parentElement;
+      }
+      return null;
+    }
+
+    document.addEventListener('touchstart', e=>{
+      const t=getAnimTarget(e.target);
+      if(!t)return;
+      t.style.transition='transform 0.08s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.08s ease,box-shadow 0.1s ease';
+      t.style.transform='scale(0.88)';
+      t.style.opacity='0.75';
+    },{passive:true});
+
+    document.addEventListener('touchend', e=>{
+      const t=getAnimTarget(e.target);
+      if(!t)return;
+      t.style.transition='transform 0.35s cubic-bezier(0.34,1.56,0.64,1),opacity 0.25s ease,box-shadow 0.25s ease';
+      t.style.transform='scale(1)';
+      t.style.opacity='1';
+    },{passive:true});
+
+    document.addEventListener('touchcancel', e=>{
+      const t=getAnimTarget(e.target);
+      if(!t)return;
+      t.style.transition='transform 0.2s ease,opacity 0.2s ease';
+      t.style.transform='scale(1)';
+      t.style.opacity='1';
+    },{passive:true});
+
+    // Mouse support (for desktop preview)
+    document.addEventListener('mousedown', e=>{
+      const t=getAnimTarget(e.target);
+      if(!t)return;
+      t.style.transition='transform 0.08s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.08s ease';
+      t.style.transform='scale(0.90)';
+      t.style.opacity='0.80';
+    });
+    document.addEventListener('mouseup', e=>{
+      const t=getAnimTarget(e.target);
+      if(!t)return;
+      t.style.transition='transform 0.3s cubic-bezier(0.34,1.56,0.64,1),opacity 0.2s ease';
+      t.style.transform='scale(1)';
+      t.style.opacity='1';
+    });
+  </script>
+</body>
+</html>
