@@ -10,18 +10,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "22": "^0.0.0",
     "@capacitor-community/sqlite": "^8.1.0",
     "@capacitor/android": "^8.3.0",
     "@capacitor/app": "^8.1.0",
     "@capacitor/cli": "^8.3.0",
     "@capacitor/core": "^8.3.0",
     "@capacitor/filesystem": "^8.1.2",
-    "@capacitor/push-notifications": "^8.0.3",
     "@capacitor/status-bar": "^8.0.2",
     "@capacitor/toast": "^8.0.1",
-    "firebase": "^12.11.0",
-    "firebase-functions": "^7.2.5",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

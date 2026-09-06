@@ -1,131 +1,166 @@
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { initializeApp } = require("firebase-admin/app");
-const { getFirestore } = require("firebase-admin/firestore");
+const { FieldValue, getFirestore } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
 
 initializeApp();
+
+const INVALID_TOKEN_CODES = new Set([
+  "messaging/registration-token-not-registered",
+  "messaging/invalid-registration-token",
+]);
+
+function messageBody(msg) {
+  if (msg.type === "voice") return "🎙 Голосовое сообщение";
+  if (msg.type === "circle") return "⏺ Видео-кружок";
+  if (msg.type === "image") return "🖼 Фото";
+  if (msg.type === "video") return "🎥 Видео";
+  if (msg.type === "file") return "📎 " + (msg.fileName || "Файл");
+  if (msg.type === "audio") return "🎵 Аудио";
+  if (msg.type === "sticker") return msg.text || "Стикер";
+  return msg.text || "Новое сообщение";
+}
+
+function collectRecipientDevices(userDoc) {
+  const user = userDoc.data() || {};
+  const devices = [];
+  const seenTokens = new Set();
+
+  const add = (token, deviceId, preferences = {}, legacy = false) => {
+    if (typeof token !== "string" || !token.trim() || seenTokens.has(token)) return;
+    seenTokens.add(token);
+    devices.push({
+      uid: userDoc.id,
+      token,
+      deviceId,
+      preferences: preferences && typeof preferences === "object" ? preferences : {},
+      legacy,
+    });
+  };
+
+  if (user.pushDevices && typeof user.pushDevices === "object") {
+    Object.entries(user.pushDevices).forEach(([deviceId, device]) => {
+      if (!device || typeof device !== "object") return;
+      add(device.token, deviceId, device.preferences);
+    });
+  }
+
+  // Совместимость с серверным push_firestore.go, который может ещё читать
+  // единственное поле fcmToken. После обновления клиента токен уже дублируется
+  // в карте устройств, поэтому один и тот же адрес не получит дубль.
+  if (user.pushTransport === "fcm") {
+    add(user.fcmToken, null, {}, true);
+  }
+
+  return devices;
+}
+
+function shouldNotify(device, chatId, chatType) {
+  const preferences = device.preferences || {};
+  if (Array.isArray(preferences.mutedChatIds) && preferences.mutedChatIds.includes(chatId)) {
+    return false;
+  }
+  if (chatType !== "direct" && preferences.groups === false) return false;
+  return true;
+}
+
+async function removeStaleDevice(db, recipient) {
+  const patch = {};
+  if (recipient.deviceId && /^[A-Za-z0-9_-]+$/.test(recipient.deviceId)) {
+    patch["pushDevices." + recipient.deviceId] = FieldValue.delete();
+  }
+  if (recipient.legacy) patch.fcmToken = FieldValue.delete();
+  if (!Object.keys(patch).length) return;
+  await db.doc("users/" + recipient.uid).update(patch);
+}
 
 exports.sendPushNotification = onDocumentCreated(
   "chats/{chatId}/messages/{msgId}",
   async (event) => {
     const msg = event.data?.data();
     const chatId = event.params.chatId;
-
-    if (!msg || !msg.uid) return null;
+    if (!msg || !msg.uid || !chatId) return null;
 
     try {
       const db = getFirestore();
-
-      // Получаем данные чата
-      const chatDoc = await db.doc(`chats/${chatId}`).get();
+      const chatDoc = await db.doc("chats/" + chatId).get();
       if (!chatDoc.exists) return null;
-      const chat = chatDoc.data();
 
-      // Все участники кроме отправителя
-      const members = (chat.members || []).filter(uid => uid !== msg.uid);
-      if (!members.length) return null;
+      const chat = chatDoc.data() || {};
+      const memberIds = (chat.members || []).filter(uid => uid && uid !== msg.uid);
+      if (!memberIds.length) return null;
 
-      // Получаем FCM токены
-      const userDocs = await Promise.all(
-        members.map(uid => db.doc(`users/${uid}`).get())
+      const memberDocs = await Promise.all(
+        memberIds.map(uid => db.doc("users/" + uid).get())
       );
-
-      const now = Date.now();
-      const ACTIVE_CHAT_TTL_MS = 45_000;
-      const recipients = userDocs
-        .filter(d => d.exists && d.data()?.fcmToken)
-        .map(d => {
-          const data = d.data() || {};
-          return { uid: d.id, token: data.fcmToken, data };
-        })
-        .filter(r => {
-          const activeAtMs = Number(r.data.activeAtMs || 0);
-          const isViewingThisChat =
-            r.data.appActive === true &&
-            r.data.activeChatId === chatId &&
-            activeAtMs > 0 &&
-            now - activeAtMs < ACTIVE_CHAT_TTL_MS;
-          return !isViewingThisChat;
-        });
+      const recipients = memberDocs
+        .filter(userDoc => userDoc.exists)
+        .flatMap(collectRecipientDevices)
+        .filter(device => shouldNotify(device, chatId, chat.type || "direct"));
 
       if (!recipients.length) return null;
 
-      // Текст уведомления
-      let body = msg.text || "";
-      if (msg.type === "voice")  body = "🎙 Голосовое сообщение";
-      else if (msg.type === "circle") body = "⭕ Видео-кружок";
-      else if (msg.type === "image")  body = "🖼 Фото";
-      else if (msg.type === "video")  body = "🎥 Видео";
-      else if (msg.type === "file")   body = `📎 ${msg.fileName || "Файл"}`;
-      else if (msg.type === "audio")  body = "🎵 Аудио";
-      else if (msg.type === "sticker") body = msg.text || "Стикер";
-
       const senderName = msg.author || "Пользователь";
-      const title = chat.type === "direct"
-        ? senderName
-        : `${chat.name || "Группа"}: ${senderName}`;
+      const chatName = chat.name || "Группа";
+      const fullTitle = chat.type === "direct" ? senderName : chatName + ": " + senderName;
+      const fullBody = messageBody(msg);
 
-      // Отправляем каждому отдельно — надёжнее чем multicast
       const results = await Promise.allSettled(
-        recipients.map(r =>
-          getMessaging().send({
-            token: r.token,
+        recipients.map(recipient => {
+          const previewAllowed = recipient.preferences.preview !== false;
+          const title = previewAllowed ? fullTitle : "RedMrxGram";
+          const body = previewAllowed ? fullBody : "Новое сообщение";
+
+          return getMessaging().send({
+            token: recipient.token,
             notification: {
               title: title.substring(0, 100),
               body: body.substring(0, 200),
             },
             data: {
-              chatId: chatId,
-              senderId: msg.uid,
-              type: msg.type || "text",
+              chatId: String(chatId),
+              senderId: String(msg.uid),
+              type: String(msg.type || "text"),
             },
             android: {
               priority: "high",
-              ttl: 86400,
+              ttl: 24 * 60 * 60 * 1000,
+              collapseKey: "chat-" + chatId,
               notification: {
                 channelId: "messages",
-                priority: "high",
-                defaultSound: true,
-                defaultVibrateTimings: true,
+                tag: "chat-" + chatId,
+                notificationPriority: "PRIORITY_HIGH",
+                defaultSound: recipient.preferences.sound !== false,
+                defaultVibrateTimings: recipient.preferences.vibration !== false,
               },
             },
-          })
-        )
+          });
+        })
       );
 
       let sent = 0;
-      const badTokens = [];
-
-      results.forEach((r, i) => {
-        if (r.status === "fulfilled") {
-          sent++;
+      const staleRecipients = [];
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          sent += 1;
+          return;
+        }
+        const code = result.reason?.code || "";
+        if (INVALID_TOKEN_CODES.has(code)) {
+          staleRecipients.push(recipients[index]);
         } else {
-          const code = r.reason?.code || "";
-          if (
-            code === "messaging/registration-token-not-registered" ||
-            code === "messaging/invalid-registration-token"
-          ) {
-            badTokens.push(recipients[i].token);
-          }
+          console.warn("⚠️ Push не отправлен: " + (code || "unknown-error"));
         }
       });
 
-      // Удаляем невалидные токены
-      if (badTokens.length > 0) {
-        await Promise.allSettled(
-          badTokens.map(token =>
-            db.collection("users")
-              .where("fcmToken", "==", token)
-              .get()
-              .then(snap => snap.forEach(d => d.ref.update({ fcmToken: null })))
-          )
-        );
-      }
+      await Promise.allSettled(
+        staleRecipients.map(recipient => removeStaleDevice(db, recipient))
+      );
 
-      console.log(`✅ Sent ${sent}/${recipients.length} for chat ${chatId}`);
+      console.log("✅ Push: " + sent + "/" + recipients.length + " для чата " + chatId);
       return null;
-    } catch (e) {
-      console.error("Push error:", e);
+    } catch (error) {
+      console.error("❌ Ошибка отправки push:", error?.message || error);
       return null;
     }
   }

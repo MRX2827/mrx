@@ -1,18 +1,14 @@
-import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+// ────────────────────────────────────────────────────────────────────────────
+// firebase.js — совместимая точка входа для старого UI. Несмотря на имя,
+// здесь нет Firebase: авторизация, чаты и файлы работают с собственным Go API.
+// ────────────────────────────────────────────────────────────────────────────
+
+import { initializeApp } from "./fb/app.js";
+import { getAuth } from "./fb/auth.js";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCVfXELwfW6dcYWrPbZYdh8zW6b-7dfQy4",
-  authDomain: "redmrxgram.firebaseapp.com",
-  projectId: "redmrxgram",
-  storageBucket: "redmrxgram.firebasestorage.app",
-  messagingSenderId: "512055244113",
-  appId: "1:512055244113:web:78d3823515e9b2cbcb0f70"
-};
-
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+const app = initializeApp({});
+export const auth = getAuth();
 export const db = getFirestore(app);
 export const storage = getStorage(app);
