@@ -107,6 +107,14 @@ let subSeq = 0;
 let pingTimer = null;
 const subs = new Map(); // id -> {msg, cb}
 
+// Состояние соединения — наружу, чтобы UI мог показать "Обновление..." как в
+// Telegram, пока WS переподключается (а не только офлайн/онлайн по navigator).
+function _emitWsState(state) {
+  try {
+    window.dispatchEvent(new CustomEvent("rmg:ws", { detail: state }));
+  } catch (e) {}
+}
+
 function wsSend(obj) {
   if (ws && ws.readyState === 1) {
     try {
@@ -118,6 +126,7 @@ function wsSend(obj) {
 function wsConnect() {
   const tok = authToken();
   if (!tok || ws) return;
+  _emitWsState("connecting");
   try {
     ws = new WebSocket(SERVER_WS + "?token=" + encodeURIComponent(tok));
   } catch (e) {
@@ -127,6 +136,7 @@ function wsConnect() {
   }
   ws.onopen = () => {
     backoff = 1000;
+    _emitWsState("open");
     subs.forEach((s) => wsSend(s.msg));
     if (!pingTimer) {
       pingTimer = setInterval(() => wsSend({ type: "ping" }), 30000);
@@ -148,6 +158,7 @@ function wsConnect() {
   };
   ws.onclose = () => {
     ws = null;
+    _emitWsState("closed");
     if (pingTimer) {
       clearInterval(pingTimer);
       pingTimer = null;

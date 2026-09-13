@@ -58,6 +58,20 @@ async function _createTables() {
       key   TEXT PRIMARY KEY,
       value TEXT DEFAULT 'null'
     );
+
+    CREATE TABLE IF NOT EXISTS media (
+      key         TEXT PRIMARY KEY,
+      chat_id     TEXT NOT NULL,
+      msg_id      TEXT NOT NULL,
+      kind        TEXT DEFAULT 'file',
+      remote_url  TEXT DEFAULT '',
+      local_path  TEXT DEFAULT '',
+      mime        TEXT DEFAULT '',
+      size        INTEGER DEFAULT 0,
+      status      TEXT DEFAULT 'none',
+      updated_at  INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_media_chat ON media(chat_id);
   `);
 }
 
@@ -179,6 +193,100 @@ export async function clearChatMsgs(chatId) {
     return;
   }
   try { await _db.run(`DELETE FROM messages WHERE chat_id=?`, [chatId]); } catch {}
+}
+
+// ─── Media downloads (metadata only — actual bytes live on disk, see media.js) ─
+// One row per message that carries a file. `status`: none | downloading | done | failed.
+export async function getMediaEntry(chatId, msgId) {
+  const key = `${chatId}::${msgId}`;
+  if (!_ready || !_db) return _ls_getMedia()[key] || null;
+  try {
+    const res = await _db.query(`SELECT * FROM media WHERE key=?`, [key]);
+    return res.values?.length ? _rowToMedia(res.values[0]) : null;
+  } catch (e) {
+    console.warn("getMediaEntry error:", e.message);
+    return null;
+  }
+}
+
+export async function getMediaForChat(chatId) {
+  if (!_ready || !_db) {
+    const all = _ls_getMedia();
+    return Object.values(all).filter(m => m.chatId === chatId);
+  }
+  try {
+    const res = await _db.query(`SELECT * FROM media WHERE chat_id=?`, [chatId]);
+    return (res.values || []).map(_rowToMedia);
+  } catch (e) {
+    console.warn("getMediaForChat error:", e.message);
+    return [];
+  }
+}
+
+// Partial update — merges with whatever's already stored for this key.
+export async function upsertMedia(chatId, msgId, fields) {
+  const key = `${chatId}::${msgId}`;
+  const prev = await getMediaEntry(chatId, msgId) || {
+    chatId, msgId, kind: "file", remoteUrl: "", localPath: "", mime: "", size: 0, status: "none",
+  };
+  const next = { ...prev, ...fields, chatId, msgId, updatedAt: Date.now() };
+
+  if (!_ready || !_db) {
+    const all = _ls_getMedia();
+    all[key] = next;
+    _ls_setMedia(all);
+    return;
+  }
+  try {
+    await _db.run(
+      `INSERT OR REPLACE INTO media
+       (key, chat_id, msg_id, kind, remote_url, local_path, mime, size, status, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [
+        key, chatId, msgId,
+        next.kind || "file",
+        next.remoteUrl || "",
+        next.localPath || "",
+        next.mime || "",
+        Number(next.size) || 0,
+        next.status || "none",
+        next.updatedAt,
+      ]
+    );
+  } catch (e) {
+    console.warn("upsertMedia error:", e.message);
+  }
+}
+
+export async function deleteMediaForChat(chatId) {
+  if (!_ready || !_db) {
+    const all = _ls_getMedia();
+    Object.keys(all).forEach(k => { if (all[k].chatId === chatId) delete all[k]; });
+    _ls_setMedia(all);
+    return;
+  }
+  try { await _db.run(`DELETE FROM media WHERE chat_id=?`, [chatId]); } catch {}
+}
+
+function _rowToMedia(row) {
+  return {
+    chatId: row.chat_id,
+    msgId: row.msg_id,
+    kind: row.kind,
+    remoteUrl: row.remote_url,
+    localPath: row.local_path,
+    mime: row.mime,
+    size: row.size,
+    status: row.status,
+    updatedAt: row.updated_at,
+  };
+}
+
+function _ls_getMedia() {
+  try { return _parse(localStorage.getItem("rmg_media"), {}); } catch { return {}; }
+}
+function _ls_setMedia(all) {
+  try { localStorage.setItem("rmg_media", JSON.stringify(all)); } catch {}
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
