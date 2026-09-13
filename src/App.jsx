@@ -1,6 +1,37 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, createContext, useContext, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { initDB, saveMsg, getMsgs, deleteMsg, updateMsgReactions, updateMsgText, getSetting, setSetting, clearChatMsgs, searchMsgs } from "./db.js";
+import { getCachedMediaSrc, ensureMediaDownloaded, pauseMediaDownloads, resumeMediaDownloads } from "./media.js";
+
+// ─── Media: локальный (скачанный) src вместо remote_url, если уже есть на диске ─
+// Возвращает то же самое, что раньше давало "msg.xUrl||msg.xData" — то есть
+// сразу что-то показывающееся, — но параллельно проверяет SQLite-таблицу media
+// и, если файл уже скачан на диск, подменяет src на локальный (file://…), а если
+// не скачан — тихо запускает скачивание в фоне через media.js для будущего офлайн-
+// доступа. В браузере (не Android) media.js — no-op, ничего не меняется.
+function useMediaSrc(chatId, msg, remote, kind) {
+  const [src,setSrc]=useState(remote);
+
+  useEffect(()=>{
+    let cancelled=false;
+    setSrc(remote);
+    if(!chatId||!msg.id||!remote){
+      if(remote)console.log("[media] hook skip, no chatId/msg.id:",chatId,msg.id,kind);
+      return;
+    }
+    (async()=>{
+      const cached=await getCachedMediaSrc(chatId,msg.id);
+      if(cancelled)return;
+      if(cached){console.log("[media] cache hit:",chatId,msg.id,kind);setSrc(cached);return;}
+      const local=await ensureMediaDownloaded(chatId,msg.id,remote,kind,msg.fileType||"",msg.fileSize||0);
+      if(!cancelled&&local)setSrc(local);
+    })();
+    return ()=>{cancelled=true;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[chatId,msg.id,remote,kind]);
+
+  return src;
+}
 
 // ─── Go Server ────────────────────────────────────────────────────────────────
 const SERVER_HTTP = "https://redmrxgram.duckdns.org";
@@ -9,7 +40,12 @@ const SERVER_WS   = "wss://redmrxgram.duckdns.org";
 // Совместимые вызовы данных и файлов идут на собственный сервер.
 // Firebase используется отдельно для FCM, поэтому push-плагин не алиасится.
 async function serverUpload(file, onProgress) {
-  return uploadFileToFirebase(file, "chat", onProgress);
+  pauseMediaDownloads();
+  try {
+    return await uploadFileToFirebase(file, "chat", onProgress);
+  } finally {
+    resumeMediaDownloads();
+  }
 }
 async function serverRegister(user) {
   return user || null;
@@ -18,22 +54,22 @@ async function serverSearch(query) {
   return [];
 }
 
-const PUSH_DEVICE_ID_KEY = "rmg_push_device_id";
-const PUSH_TOKEN_KEY = "rmg_unifiedpush_registration";
+const PUSH_TOPIC_KEY = "rmg_push_topic";
 let pushRegistrationUid = "";
 let nativePushListenersReady = false;
 
-function getPushDeviceId() {
-  let id = "";
-  try { id = localStorage.getItem(PUSH_DEVICE_ID_KEY) || ""; } catch (e) {}
-  if (id) return id;
-
+// Топик генерируется один раз на устройство и живёт в localStorage —
+// сервер публикует уведомления в него через ntfy, когда получатель оффлайн.
+function getPushTopic() {
+  let t = "";
+  try { t = localStorage.getItem(PUSH_TOPIC_KEY) || ""; } catch (e) {}
+  if (t) return t;
   const raw = typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
     : `${Date.now()}${Math.random()}`;
-  id = `d${String(raw).replace(/[^a-zA-Z0-9]/g, "").slice(0, 32)}`;
-  try { localStorage.setItem(PUSH_DEVICE_ID_KEY, id); } catch (e) {}
-  return id;
+  t = `rmg${String(raw).replace(/[^a-zA-Z0-9]/g, "")}`;
+  try { localStorage.setItem(PUSH_TOPIC_KEY, t); } catch (e) {}
+  return t;
 }
 
 function getPushPreferences() {
@@ -52,254 +88,41 @@ function getPushPreferences() {
   };
 }
 
-async function serverSaveUnifiedPush(userId, registration) {
-  if (!userId || !registration?.endpoint || !registration?.keys?.p256dh || !registration?.keys?.auth) return;
-  const deviceId = getPushDeviceId();
-  await api("/push/unifiedpush", {
-    method: "PUT",
-    body: {
-      deviceId,
-      endpoint: registration.endpoint,
-      keys: registration.keys,
-      preferences: getPushPreferences(),
-    },
-  });
-  try { localStorage.setItem(PUSH_TOKEN_KEY, JSON.stringify(registration)); } catch (e) {}
+async function serverSaveTopic(userId, topic) {
+  if (!userId || !topic) return;
+  await api(`/user/${userId}`, { method: "POST", body: { pushTopic: topic } });
+  // docstore.go шлёт пуш при создании сообщения, беря токен из документа
+  // users/{uid}.fcmToken — это отдельное хранилище от SQL-таблицы users,
+  // поэтому топик нужно продублировать и туда.
+  await setDoc(doc(db, "users", userId), { fcmToken: topic }, { merge: true });
 }
 
+// Мьют/звук/вибро сейчас применяются только локально в самом уведомлении —
+// сервер про эти настройки не знает и шлёт всё как есть в топик. Заглушка
+// оставлена на случай, если сервер научится их учитывать (см. mutedChatIds).
 async function syncPushPreferences(userId) {
   if (!userId) return;
-  try {
-    await api("/push/unifiedpush", {
-      method: "PATCH",
-      body: {
-        deviceId: getPushDeviceId(),
-        preferences: getPushPreferences(),
-      },
-    });
-  } catch (e) {}
 }
 
 async function clearPushRegistration(userId) {
   if (!userId) return;
-  try {
-    await api("/push/unifiedpush", { method: "DELETE", body: { deviceId: getPushDeviceId() } });
-  } catch (e) {}
-  try { localStorage.removeItem(PUSH_TOKEN_KEY); } catch (e) {}
+  try { await api(`/user/${userId}`, { method: "POST", body: { pushTopic: "" } }); } catch (e) {}
+  try { await setDoc(doc(db, "users", userId), { fcmToken: "" }, { merge: true }); } catch (e) {}
   if (Capacitor.isNativePlatform()) {
-    PushNotifications.unregister().catch(() => {});
+    NativePush.stop().catch(() => {});
   }
   if (pushRegistrationUid === userId) pushRegistrationUid = "";
 }
 
-// Fallback to localStorage if SQLite not available (web browser)
-let _db = null;
-let _sqliteReady = false;
 // Текущий открытый чат (для подавления Android-уведомлений в foreground)
 let _activeChatId = null;
 
-async function initSQLite() {
-  try {
-    const { CapacitorSQLite, SQLiteConnection } = await import("@capacitor-community/sqlite");
-    const sqlite = new SQLiteConnection(CapacitorSQLite);
-    _db = await sqlite.createConnection("rmg_db", false, "no-encryption", 1, false);
-    await _db.open();
-    await _db.execute(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        chat_id TEXT NOT NULL,
-        sender_id TEXT,
-        author TEXT,
-        type TEXT DEFAULT 'text',
-        text TEXT DEFAULT '',
-        file_data TEXT DEFAULT '',
-        file_url TEXT DEFAULT '',
-        file_name TEXT DEFAULT '',
-        file_type TEXT DEFAULT '',
-        file_size INTEGER DEFAULT 0,
-        duration TEXT DEFAULT '',
-        waveform TEXT DEFAULT '',
-        reply_to TEXT DEFAULT '',
-        reactions TEXT DEFAULT '',
-        video_url TEXT DEFAULT '',
-        video_data TEXT DEFAULT '',
-        time TEXT DEFAULT '',
-        unix_ms INTEGER DEFAULT 0,
-        pending INTEGER DEFAULT 0,
-        edited INTEGER DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_msgs_chat ON messages(chat_id, unix_ms ASC);
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      );
-    `);
-    _sqliteReady = true;
-    console.log("✅ SQLite ready");
-  } catch(e) {
-    console.log("⚠️ SQLite unavailable, using localStorage:", e.message);
-    _sqliteReady = false;
-  }
-}
-
-const SQLiteDB = {
-  // Messages
-  async saveMsg(msg) {
-    if (!_sqliteReady || !_db) {
-      // Fallback: localStorage
-      try {
-        const key = `rmg_msgs_${msg.chatId}`;
-        const arr = JSON.parse(localStorage.getItem(key) || "[]");
-        const idx = arr.findIndex(m => m.id === msg.id);
-        if (idx >= 0) arr[idx] = msg; else arr.push(msg);
-        if (arr.length > 300) arr.splice(0, arr.length - 300);
-        localStorage.setItem(key, JSON.stringify(arr));
-      } catch {}
-      return;
-    }
-    try {
-      await _db.run(
-        `INSERT OR REPLACE INTO messages
-         (id,chat_id,sender_id,author,type,text,file_data,file_url,file_name,file_type,file_size,
-          duration,waveform,reply_to,reactions,video_url,video_data,time,unix_ms,pending,edited)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          msg.id || "", msg.chatId || msg.chat_id || "",
-          msg.uid || msg.sender_id || "",
-          msg.author || "",
-          msg.type || "text",
-          msg.text || "",
-          msg.fileData || "",
-          msg.fileUrl || "",
-          msg.fileName || "",
-          msg.fileType || "",
-          msg.fileSize || 0,
-          msg.duration || "",
-          JSON.stringify(msg.waveform || []),
-          JSON.stringify(msg.replyTo || null),
-          JSON.stringify(msg.reactions || {}),
-          msg.videoUrl || "",
-          msg.videoData || "",
-          msg.time || "",
-          msg.unixMs || msg.unix_ms || Date.now(),
-          msg._pending ? 1 : 0,
-          msg.edited ? 1 : 0,
-        ]
-      );
-    } catch(e) { console.warn("SQLite saveMsg error:", e.message); }
-  },
-
-  async getMsgs(chatId, limit = 200) {
-    if (!_sqliteReady || !_db) {
-      try {
-        return JSON.parse(localStorage.getItem(`rmg_msgs_${chatId}`) || "[]");
-      } catch { return []; }
-    }
-    try {
-      const res = await _db.query(
-        `SELECT * FROM messages WHERE chat_id=? ORDER BY unix_ms ASC LIMIT ?`,
-        [chatId, limit]
-      );
-      return (res.values || []).map(row => ({
-        id: row.id,
-        chatId: row.chat_id,
-        uid: row.sender_id,
-        author: row.author,
-        type: row.type,
-        text: row.text,
-        fileData: row.file_data,
-        fileUrl: row.file_url,
-        fileName: row.file_name,
-        fileType: row.file_type,
-        fileSize: row.file_size,
-        duration: row.duration,
-        waveform: JSON.parse(row.waveform || "[]"),
-        replyTo: JSON.parse(row.reply_to || "null"),
-        reactions: JSON.parse(row.reactions || "{}"),
-        videoUrl: row.video_url,
-        videoData: row.video_data,
-        time: row.time,
-        unixMs: row.unix_ms,
-        _pending: row.pending === 1,
-        edited: row.edited === 1,
-      }));
-    } catch(e) { console.warn("SQLite getMsgs error:", e.message); return []; }
-  },
-
-  async deleteMsg(msgId, chatId) {
-    if (!_sqliteReady || !_db) {
-      try {
-        const key = `rmg_msgs_${chatId}`;
-        const arr = JSON.parse(localStorage.getItem(key) || "[]").filter(m => m.id !== msgId);
-        localStorage.setItem(key, JSON.stringify(arr));
-      } catch {}
-      return;
-    }
-    try { await _db.run(`DELETE FROM messages WHERE id=?`, [msgId]); } catch {}
-  },
-
-  async updateMsg(msgId, chatId, fields) {
-    if (!_sqliteReady || !_db) {
-      try {
-        const key = `rmg_msgs_${chatId}`;
-        const arr = JSON.parse(localStorage.getItem(key) || "[]");
-        const idx = arr.findIndex(m => m.id === msgId);
-        if (idx >= 0) { arr[idx] = { ...arr[idx], ...fields }; localStorage.setItem(key, JSON.stringify(arr)); }
-      } catch {}
-      return;
-    }
-    try {
-      const sets = Object.keys(fields).map(k => {
-        const col = k.replace(/([A-Z])/g, '_$1').toLowerCase();
-        return `${col}=?`;
-      }).join(",");
-      await _db.run(`UPDATE messages SET ${sets} WHERE id=?`,
-        [...Object.values(fields).map(v => typeof v === 'object' ? JSON.stringify(v) : v), msgId]);
-    } catch {}
-  },
-
-  async searchMsgs(chatId, query) {
-    if (!_sqliteReady || !_db) {
-      try {
-        const arr = JSON.parse(localStorage.getItem(`rmg_msgs_${chatId}`) || "[]");
-        return arr.filter(m => m.text?.toLowerCase().includes(query.toLowerCase()));
-      } catch { return []; }
-    }
-    try {
-      const res = await _db.query(
-        `SELECT * FROM messages WHERE chat_id=? AND type='text' AND text LIKE ? ORDER BY unix_ms DESC LIMIT 50`,
-        [chatId, `%${query}%`]
-      );
-      return res.values || [];
-    } catch { return []; }
-  },
-
-  // Settings (replaces getS/setS)
-  async getSetting(key, def = null) {
-    if (!_sqliteReady || !_db) {
-      try { const s = JSON.parse(localStorage.getItem("rmg_s") || "{}"); return s[key] ?? def; } catch { return def; }
-    }
-    try {
-      const res = await _db.query(`SELECT value FROM settings WHERE key=?`, [key]);
-      if (res.values?.length) return JSON.parse(res.values[0].value);
-      return def;
-    } catch { return def; }
-  },
-
-  async setSetting(key, value) {
-    if (!_sqliteReady || !_db) {
-      try { const s = JSON.parse(localStorage.getItem("rmg_s") || "{}"); s[key] = value; localStorage.setItem("rmg_s", JSON.stringify(s)); } catch {}
-      return;
-    }
-    try { await _db.run(`INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)`, [key, JSON.stringify(value)]); } catch {}
-  },
-};
 import { auth, db, storage } from "./firebase";
 import { ref as sRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, signInAnonymously, registerAccount, verifyEmailCode, resendEmailCode, attachEmail, requestPasswordReset, confirmPasswordReset } from "firebase/auth";
 import { collection, doc, setDoc, getDoc, addDoc, query, orderBy, onSnapshot, where, getDocs, serverTimestamp, updateDoc, arrayUnion, limitToLast, startAfter, endBefore, deleteDoc, increment } from "firebase/firestore";
 import { Capacitor } from "@capacitor/core";
-import { PushNotifications } from "./unified-push-notifications.js";
+import { NativePush } from "./native-push.js";
 import { api } from "./fb/core.js";
 
 // ── Скрытые (удалённые у себя) чаты: {chatId: момент удаления ms}. Старый формат-массив мигрируем.
@@ -310,8 +133,16 @@ function readHidden(key){
     return raw&&typeof raw==="object"?raw:{};
   }catch(e){return{};}
 }
-function isHiddenChat(hidden,c){
-  const at=hidden?.[c?.id];
+function isHiddenChat(hiddenLocal,uid,c){
+  // Проверяем ОБА источника: старый локальный (localStorage — только на этом
+  // устройстве, стирается при переустановке приложения) и серверный —
+  // c.hiddenFor[uid], поле самого документа чата в Firestore. Серверный
+  // переживает переустановку и синхронизируется между устройствами одного
+  // аккаунта, поэтому именно на него теперь основная надежда; локальный
+  // оставлен для обратной совместимости с уже накопленными записями.
+  const atLocal=hiddenLocal?.[c?.id];
+  const atServer=c?.hiddenFor?.[uid];
+  const at=Math.max(atLocal||0,atServer||0);
   if(!at)return false;
   const last=(typeof c?.lastTimeMs==="number")?c.lastTimeMs:0;
   return !(last>at); // есть сообщение новее момента удаления — чат снова виден
@@ -323,11 +154,6 @@ async function ensureDirectChat(currentUser,profile,person){
   const otherUid=person?.uid||person?.id;
   if(!myUid||!otherUid)throw new Error("missing user id");
   const chatId=directChatId(myUid,otherUid);
-  try{
-    const hk="rmg_hidden_chats_"+myUid;
-    const hm=readHidden(hk);
-    if(hm[chatId]){delete hm[chatId];localStorage.setItem(hk,JSON.stringify(hm));}
-  }catch(e){}
   const chatRef=doc(db,"chats",chatId);
   const snap=await getDoc(chatRef).catch(()=>null);
   const old=snap?.exists?.()?snap.data():{};
@@ -1064,7 +890,7 @@ function OfflineBar({topInset=true,fixed=false}){
     : base;
   return(
     <div style={style}>
-      <span style={{fontSize:13}}>📴</span>
+      <IcCloud size={15} color="#fff"/>
       <span>Оффлайн режим — нет подключения к интернету</span>
     </div>
   );
@@ -1145,11 +971,11 @@ const AUDIO_ENGINE = {
   _savePos(){
     const t=this.track;
     if(t&&this.el)this.posCache[t.id]=this.el.currentTime;
-    try{localStorage.setItem("rmg_audio_positions",JSON.stringify(this.posCache));}catch(e){}
+    try{localStorage.setItem("rmg_audio_positions_v2",JSON.stringify(this.posCache));}catch(e){}
   },
 
-  jumpTo(i,fromPrev=false){
-    this._savePos();
+  jumpTo(i,fromPrev=false,skipSave=false){
+    if(!skipSave)this._savePos();
     // Сохраняем текущий индекс в историю (только при движении вперёд, не при prev)
     if(!fromPrev&&this.idx!==-1&&this.idx!==i){
       this.historyStack.push(this.idx);
@@ -1169,6 +995,11 @@ const AUDIO_ENGINE = {
     // If already in queue, jump to it
     const ex=this.queue.findIndex(t=>t.id===track.id);
     if(ex!==-1){this.jumpTo(ex);return;}
+    // Сохраняем позицию СТАРОГО трека здесь, ДО того как queue изменится —
+    // иначе jumpTo() ниже посчитает this.track уже по новому (вставленному)
+    // треку, а this.el всё ещё содержит старую позицию, и она ошибочно
+    // запишется под id нового трека — из-за этого новый трек стартовал
+    // с той же секунды, на которой остановился предыдущий.
     this._savePos();
     // Insert new track at current position, shift old
     if(this.idx===-1){
@@ -1177,7 +1008,21 @@ const AUDIO_ENGINE = {
     }else{
       this.queue.splice(this.idx,0,track);
     }
-    this.jumpTo(this.idx);
+    this.jumpTo(this.idx,false,true); // skipSave — уже сохранили выше корректно
+    this._persist();
+  },
+
+  // Заменяет всю очередь списком треков (например, все аудио из текущего чата)
+  // и сразу переходит на выбранный трек по его id.
+  playTrackList(tracks,trackId){
+    // Аналогично playTrack: сохраняем позицию ДО подмены очереди, и просим
+    // jumpTo не сохранять повторно (после подмены this.track указывал бы
+    // не на тот трек).
+    this._savePos();
+    this.queue=tracks;
+    this.historyStack=[]; // новая очередь — старая история переходов больше не актуальна
+    const i=Math.max(0,tracks.findIndex(t=>t.id===trackId));
+    this.jumpTo(i,false,true);
     this._persist();
   },
 
@@ -1309,10 +1154,15 @@ const AUDIO_ENGINE = {
       const q=JSON.parse(localStorage.getItem("rmg_audio_queue")||"[]");
       const i=parseInt(localStorage.getItem("rmg_audio_idx")||"-1");
       const s=JSON.parse(localStorage.getItem("rmg_audio_settings")||"{}");
-      const pos=JSON.parse(localStorage.getItem("rmg_audio_positions")||"{}");
+      // Ключ версионирован (_v2): старые записи писались багованной логикой
+      // (позиция одного трека утекала под id другого при переключении) и
+      // не заслуживают доверия. Просто игнорируем старый ключ — новый
+      // пишется только корректной логикой из этой версии.
+      const pos=JSON.parse(localStorage.getItem("rmg_audio_positions_v2")||"{}");
       this.queue=q;this.idx=i;
       this.shuffle=s.shuffle||false;this.repeat=s.repeat||"off";this.speed=s.speed||1;
       this.posCache=pos;
+      try{localStorage.removeItem("rmg_audio_positions");}catch(e){}
     }catch(e){}
   },
 };
@@ -1383,9 +1233,54 @@ function AudioCtxProvider({children}){
     };
   },[startRAF]);
 
+  // Анимация появления/закрытия мини-плеера. Живёт здесь, в единственном
+  // глобальном провайдере (не в самом MiniPlayer/AudioMiniBar), потому что
+  // MiniPlayer рендерится отдельно на КАЖДОМ экране — при переходах между
+  // экранами такой компонент может размонтироваться и смонтироваться заново,
+  // и локальное состояние анимации попросту терялось. Здесь оно переживает
+  // любые переходы между экранами.
+  //
+  // ВАЖНО: раньше открытие анимировалось через CSS @keyframes (animation),
+  // а закрытие — через CSS transition. Смена с animation на transition НА
+  // ОДНОМ И ТОМ ЖЕ элементе в одном рендере ненадёжно работает в некоторых
+  // Android WebView (браузер иногда просто «схлопывает» состояние без
+  // интерполяции). Поэтому теперь ОБА направления идут через один и тот же
+  // механизм — только transition, без единого CSS animation. miniPhase:
+  // "hidden" (плеера нет) → "entering" (только что смонтирован, стоит в
+  // начальном положении) → "shown" (в раскрытом состоянии, тут и играет
+  // transition при переходе из entering) → "exiting" (едет обратно в
+  // свёрнутое положение) → снова "hidden".
+  const [miniPhase,setMiniPhase]=useState("hidden"); // hidden|entering|shown|exiting
+  const [miniSnap,setMiniSnap]=useState(null);
+  const prevTrackRef=useRef(null);
+  if(state.track){
+    prevTrackRef.current={track:state.track,playing:state.playing,progress:state.progress,queue:state.queue,idx:state.idx};
+    if(miniPhase==="hidden")setMiniPhase("entering");
+    else if(miniPhase==="exiting")setMiniPhase("shown"); // передумали закрывать — трек снова играет
+  }else if(miniPhase==="shown"||miniPhase==="entering"){
+    setMiniSnap(prevTrackRef.current);
+    setMiniPhase("exiting");
+  }
+  useEffect(()=>{
+    if(miniPhase==="entering"){
+      // Даём браузеру отрисовать «свёрнутое» начальное положение ХОТЯ БЫ
+      // один кадр, и только потом просим ехать в раскрытое — иначе это будет
+      // первое и единственное состояние узла, transition играть не от чего.
+      let raf2;
+      const raf1=requestAnimationFrame(()=>{raf2=requestAnimationFrame(()=>setMiniPhase("shown"));});
+      return ()=>{cancelAnimationFrame(raf1);if(raf2)cancelAnimationFrame(raf2);};
+    }
+    if(miniPhase==="exiting"){
+      const t=setTimeout(()=>setMiniPhase("hidden"),320);
+      return ()=>clearTimeout(t);
+    }
+  },[miniPhase]);
+
   const ctx={
     ...state,
+    miniPhase,miniSnap,
     playTrack:(track)=>{AUDIO_ENGINE.playTrack(track);setState(prev=>({...prev,showMini:true}));},
+    playTrackList:(tracks,trackId)=>{AUDIO_ENGINE.playTrackList(tracks,trackId);setState(prev=>({...prev,showMini:true}));},
     addToQueue:(track)=>{AUDIO_ENGINE.addToQueue(track);setState(prev=>({...prev,showMini:true}));},
     play:()=>AUDIO_ENGINE.play(),
     pause:()=>AUDIO_ENGINE.pause(),
@@ -1426,7 +1321,7 @@ const THEMES = {
   mrx:   { bg:"#000000", surface:"#0D0000", surface2:"#1A0000", border:"#3D0000", text:"#FFFFFF", text2:"#FF6666", accent:"#FF0000", accent2:"#CC0000" },
   green: { bg:"#061209", surface:"#0C1E10", surface2:"#122817", border:"#1E4228", text:"#FFFFFF", text2:"#6FCF97", accent:"#22C55E", accent2:"#15803D" },
   glass: { bg:"#0a0a1a", surface:"rgba(255,255,255,0.07)", surface2:"rgba(255,255,255,0.12)", border:"rgba(255,255,255,0.18)", text:"#FFFFFF", text2:"rgba(255,255,255,0.55)", accent:"#7dd3fc", accent2:"#38bdf8", _glass:true },
-  crystal: { bg:"transparent", surface:"rgba(255,255,255,0.04)", surface2:"rgba(255,255,255,0.08)", border:"rgba(255,255,255,0.12)", text:"#FFFFFF", text2:"rgba(255,255,255,0.5)", accent:"#e0f2fe", accent2:"#bae6fd", _glass:true, _crystal:true },
+  crystal: { bg:"transparent", surface:"rgba(255,255,255,0.05)", surface2:"rgba(255,255,255,0.09)", border:"rgba(255,255,255,0.14)", text:"#FFFFFF", text2:"rgba(255,255,255,0.55)", accent:"#FFFFFF", accent2:"#D8D8DC", _glass:true, _crystal:true },
 };
 // ─── Chat Settings (wallpaper, accent, font size) ────────────────────────────
 const WALLPAPERS = [
@@ -1455,6 +1350,14 @@ const PALETTE=["#E53935","#E91E63","#9C27B0","#3F51B5","#2196F3","#009688","#4CA
 const getS=k=>{try{return JSON.parse(localStorage.getItem("rmg_s")||"{}")[k];}catch{return null;}};
 const setS=(k,v)=>{try{const s=JSON.parse(localStorage.getItem("rmg_s")||"{}");s[k]=v;localStorage.setItem("rmg_s",JSON.stringify(s));}catch{}};
 const colorFor=s=>{let h=0;for(let i=0;i<(s||"").length;i++)h=s.charCodeAt(i)+((h<<5)-h);return PALETTE[Math.abs(h)%PALETTE.length];};
+// Чёрный или белый текст поверх заливки цветом accent — чтобы не потерять
+// читаемость, если выбранный акцент светлый (например, белый).
+const contrastOn=hex=>{
+  const h=(hex||"").replace("#","");
+  if(h.length!==6)return"#fff";
+  const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
+  return(0.299*r+0.587*g+0.114*b)/255>0.6?"#000":"#fff";
+};
 const dominantColorFromImage=(url,fallback="#E53935")=>new Promise(resolve=>{
   if(!url){resolve(fallback);return;}
   try{
@@ -1611,13 +1514,14 @@ function Waveform({wf,progress=0,fromMe}){
 }
 
 // ─── Voice Bubble ────────────────────────────────────────────────────────────
-function VoiceBubble({msg,fromMe}){
+function VoiceBubble({msg,fromMe,chatId}){
   const {accent,text2}=useContext(ThemeCtx);
   const[playing,setPlaying]=useState(false);
   const[prog,setProg]=useState(0);
   const[dur,setDur]=useState(msg.duration||"0:00");
   const[err,setErr]=useState(false);
   const aRef=useRef(null),raf=useRef(null);
+  const src=useMediaSrc(chatId,msg,msg.audioUrl||msg.audioData||msg.fileUrl||msg.fileData||"","audio");
 
   const stop=()=>{
     try{if(aRef.current){aRef.current.pause();aRef.current.src="";aRef.current=null;}}catch(e){}
@@ -1627,7 +1531,6 @@ function VoiceBubble({msg,fromMe}){
 
   const toggle=()=>{
     if(playing){stop();return;}
-    const src=msg.audioUrl||msg.audioData||msg.fileUrl||msg.fileData;
     if(!src){setErr(true);return;}
     setErr(false);
     try{
@@ -1684,9 +1587,10 @@ function VoiceBubble({msg,fromMe}){
 }
 
 
-function AudioBubble({msg,fromMe}){
+function AudioBubble({msg,fromMe,audioMsgs,chatId}){
   const {accent,text,text2}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
+  const cachedSrc=useMediaSrc(chatId,msg,msg.fileUrl||msg.fileData||msg.audioUrl||msg.audioData||"","audio");
   const trackId=msg.id||(msg.fileUrl||msg.audioUrl||msg.fileData||msg.audioData||"");
   const isActive=audio?.track?.id===trackId;
   const isPlaying=isActive&&audio?.playing;
@@ -1694,21 +1598,31 @@ function AudioBubble({msg,fromMe}){
   const curTime=isActive?(audio?.currentTime||0):0;
   const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`;
 
-  const buildTrack=()=>({
-    id:trackId,
-    src:msg.fileUrl||msg.fileData||msg.audioUrl||msg.audioData||"",
-    name:(msg.fileName||"Аудио").replace(/\.(mp3|m4a|flac|wav|aac|ogg|wma|opus|aiff|ape)$/i,""),
-    ext:(msg.fileName||"").split(".").pop()?.toUpperCase()||"MP3",
-    size:msg.fileSize?fmtSize(msg.fileSize):"",
-    chatName:"",author:msg.author||"",
+  // Для очереди (audioMsgs) пока берём src как раньше — у каждого из этих
+  // сообщений есть свой собственный <AudioBubble>, который сам скачивает
+  // себя в фоне; здесь же, для ТЕКУЩЕГО msg, если локальный файл уже готов,
+  // подставляем его вместо сетевого URL.
+  const buildTrackFrom=(m)=>({
+    id:m.id||(m.fileUrl||m.audioUrl||m.fileData||m.audioData||""),
+    src:(m.id===msg.id&&cachedSrc)?cachedSrc:(m.fileUrl||m.fileData||m.audioUrl||m.audioData||""),
+    name:(m.fileName||"Аудио").replace(/\.(mp3|m4a|flac|wav|aac|ogg|wma|opus|aiff|ape)$/i,""),
+    ext:(m.fileName||"").split(".").pop()?.toUpperCase()||"MP3",
+    size:m.fileSize?fmtSize(m.fileSize):"",
+    chatName:"",author:m.author||"",
   });
+  const buildTrack=()=>buildTrackFrom(msg);
 
   const toggle=()=>{
     if(!audio)return;
-    const src=msg.fileUrl||msg.fileData||msg.audioUrl||msg.audioData;
+    const src=cachedSrc;
     if(!src)return;
     if(isActive){isPlaying?audio.pause():audio.play();}
-    else{audio.playTrack(buildTrack());}
+    else if(audioMsgs&&audioMsgs.length>1){
+      // Собираем очередь из всех аудио этого чата, а не только из одного сообщения
+      audio.playTrackList(audioMsgs.map(buildTrackFrom),trackId);
+    }else{
+      audio.playTrack(buildTrack());
+    }
   };
 
   const name=msg.fileName||"Аудио";
@@ -1732,7 +1646,7 @@ function AudioBubble({msg,fromMe}){
   );
 }
 
-function CircleBubble({msg,onFullscreen}){
+function CircleBubble({msg,onFullscreen,chatId}){
   const {accent,accent2}=useContext(ThemeCtx);
   const[playing,setPlaying]=useState(false);
   const[prog,setProg]=useState(0);
@@ -1741,7 +1655,7 @@ function CircleBubble({msg,onFullscreen}){
   const BASE_SIZE=138;
   const ACTIVE_SIZE=188;
   const size=playing?ACTIVE_SIZE:BASE_SIZE;
-  const src=msg.videoUrl||msg.videoData;
+  const src=useMediaSrc(chatId,msg,msg.videoUrl||msg.videoData||"","video");
 
   // Превью первого кадра через скрытый video + canvas
   useEffect(()=>{
@@ -1778,7 +1692,7 @@ function CircleBubble({msg,onFullscreen}){
     if(!v.src||v.src!==src)v.src=src;
     // Регистрируем как активное видео — останавливает любые другие плееры (видео/кружки)
     _registerActiveVideo(v);
-    v.play().catch(()=>{});setPlaying(true);
+    v.play().catch(e=>console.warn("[circle] play() rejected:",e?.name,e?.message));setPlaying(true);
     const tick=()=>{
       if(v&&!v.paused&&!v.ended){
         if(v.duration)setProg(v.currentTime/v.duration);
@@ -1835,6 +1749,7 @@ function CircleBubble({msg,onFullscreen}){
         )}
 
         <video ref={vRef} playsInline preload="none"
+          onError={e=>console.warn("[circle] video error:",e?.target?.error?.code,e?.target?.error?.message,"src=",e?.target?.currentSrc)}
           style={{position:"relative",zIndex:1,width:"100%",height:"100%",objectFit:"cover",
             opacity:playing?1:0,transition:"opacity 0.18s"}}/>
 
@@ -1924,7 +1839,7 @@ function AudioPlayer({msg,fromMe}){
             overflow:"hidden",boxShadow:isPlaying?`0 0 14px ${accent}66`:"none",transition:"box-shadow 0.3s"}}>
             {msg.coverUrl
               ?<img src={msg.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              :<span style={{fontSize:22}}>🎵</span>}
+              :<IcMusicNote size={22} color={fromMe?"#fff":accent}/>}
           </div>
           <button onClick={toggle} style={{position:"absolute",inset:0,borderRadius:12,border:"none",cursor:"pointer",
             background:isPlaying?"rgba(0,0,0,0.4)":"rgba(0,0,0,0.25)",color:"#fff",fontSize:14,
@@ -2002,6 +1917,37 @@ const IcSetInfo=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 
 const IcSetLogout=_ic("M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z");
 const IcSearchSm=_ic("M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z");
 const IcPencilSm=_ic("M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z");
+// ─── Audio player icons ───────────────────────────────────────────────────
+const IcAudioPrev=_ic("M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z");
+const IcAudioNext=_ic("M4 18l8.5-6L4 6v12zm9-12v12h2V6h-2z");
+const IcAudioPlay=_ic("M8 5v14l11-7z");
+const IcAudioPause=_ic("M6 19h4V5H6v14zm8-14v14h4V5h-4z");
+const IcAudioClose=_ic("M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z");
+const IcAudioShuffle=_ic("M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z");
+const IcAudioRepeat=_ic("M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z");
+const IcAudioDownload=_ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z");
+const IcChevronDown=_ic("M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z");
+const IcMusicNote=_ic("M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z");
+const IcClipboard=_ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 16H5V5h2v3h10V5h2v14z");
+const IcGlobe=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm7.93 9h-3.02c-.15-2.19-.65-4.16-1.4-5.62A8.03 8.03 0 0 1 19.93 11zM12 4.06c.87 1.15 1.7 3.14 1.93 6.94h-3.86c.23-3.8 1.06-5.79 1.93-6.94zM4.07 13h3.02c.15 2.19.65 4.16 1.4 5.62A8.03 8.03 0 0 1 4.07 13zm3.02-2H4.07a8.03 8.03 0 0 1 4.42-5.62C7.74 6.84 7.24 8.81 7.09 11zM12 19.94c-.87-1.15-1.7-3.14-1.93-6.94h3.86c-.23 3.8-1.06 5.79-1.93 6.94zM13.91 13h3.02a8.03 8.03 0 0 1-4.42 5.62c.75-1.46 1.25-3.43 1.4-5.62z");
+const IcSend=_ic("M2.01 21L23 12 2.01 3 2 10l15 2-15 2z");
+const IcRobot=_ic("M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7v1h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1H4v-1H3a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1v-1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2zM8.5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z");
+const IcCloud=_ic("M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z");
+const IcVolume=_ic("M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z");
+const IcPaperclip=_ic("M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z");
+const IcMic=_ic("M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z");
+const IcTag=_ic("M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 19c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z");
+const IcLink=_ic("M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z");
+const IcWarning=_ic("M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z");
+const IcSun=_ic("M6.76 4.84l-1.8-1.79-1.41 1.41 1.79 1.79 1.42-1.41zM4 10.5H1v2h3v-2zm9-9.95h-2V3.5h2V.55zm7.45 3.91l-1.41-1.41-1.79 1.79 1.41 1.41 1.79-1.79zm-3.21 13.7l1.79 1.8 1.41-1.41-1.8-1.79-1.4 1.4zM20 10.5v2h3v-2h-3zm-8-5c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm-1 16.95h2V19.5h-2v2.95zm-7.45-3.91l1.41 1.41 1.79-1.8-1.41-1.41-1.79 1.8z");
+const IcFastForward=_ic("M4 18l8.5-6L4 6v12zm9-12v12l8.5-6z");
+const IcFastRewind=_ic("M11 18V6l-8.5 6 8.5 6zm.5-6l8.5 6V6l-8.5 6z");
+const IcEye=_ic("M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z");
+const IcEyeOff=_ic("M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78 3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z");
+const IcMailAuth=_ic("M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z");
+const IcLockAuth=_ic("M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm3 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z");
+const IcUserAuth=_ic("M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.67-5.33-4-8-4z");
+const IcCircleOutline=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z");
 
 const haptic=(ms=10)=>{try{if(navigator.vibrate)navigator.vibrate(ms);}catch(e){}};
 const _mi={display:"block",margin:"0 auto"};
@@ -2019,7 +1965,6 @@ const IcPin=_ic("M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1
 const IcArchiveBox=_ic("M20.54 5.23l-1.39-1.68C18.88 3.21 18.47 3 18 3H6c-.47 0-.88.21-1.16.55L3.46 5.23C3.17 5.57 3 6.02 3 6.5V19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6.5c0-.48-.17-.93-.46-1.27zM12 17.5L6.5 12H10v-2h4v2h3.5L12 17.5zM5.12 5l.81-1h12l.94 1H5.12z");
 const IcMute=_ic("M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z");
 const IcCheckOne=_ic("M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z");
-const IcEye=_ic("M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z");
 const IcKeys=_ic("M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z");
 const IcSpark=_ic("M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z");
 const IcDot=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z");
@@ -2103,7 +2048,7 @@ function injectVpStyles() {
 // ─── Gesture Indicator Pill ───────────────────────────────────────────────────
 function GesturePill({ type, value }) {
   // type: "volume" | "brightness" | "seek"
-  const icons = { volume: "🔊", brightness: "☀️", seek: value > 0 ? "⏩" : "⏪" };
+  const IconComp = type==="volume"?IcVolume:type==="brightness"?IcSun:(value>0?IcFastForward:IcFastRewind);
   const label =
     type === "seek"
       ? (value > 0 ? `+${Math.abs(value)}с` : `-${Math.abs(value)}с`)
@@ -2122,7 +2067,7 @@ function GesturePill({ type, value }) {
       animation: "_vpPillIn 0.18s cubic-bezier(0.34,1.56,0.64,1)",
       zIndex: 20, pointerEvents: "none", minWidth: 140,
     }}>
-      <span style={{ fontSize: 22 }}>{icons[type]}</span>
+      <span style={{ display:"flex",alignItems:"center" }}><IconComp size={22} color="#fff"/></span>
       <div style={{ flex: 1 }}>
         {progress !== null && (
           <div style={{
@@ -3168,7 +3113,7 @@ function VideoFullscreen({ src, fileName, videoRef: _ignored, playing: _p, setPl
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {/* Volume indicator (bar) */}
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <span style={{ fontSize: 13 }}>🔊</span>
+              <span style={{ display:"flex",alignItems:"center" }}><IcVolume size={13} color="#fff"/></span>
               <div style={{ width: 48, height: 3, background: "rgba(255,255,255,0.18)", borderRadius: 2 }}>
                 <div style={{
                   height: "100%", borderRadius: 2, background: "rgba(255,255,255,0.7)",
@@ -3196,9 +3141,9 @@ function VideoFullscreen({ src, fileName, videoRef: _ignored, playing: _p, setPl
   );
 }
 
-function FileBubble({msg,fromMe,onOpenLightbox}){
+function FileBubble({msg,fromMe,onOpenLightbox,chatId}){
   const {accent,text2,text}=useContext(ThemeCtx);
-  const src=msg.fileUrl||msg.fileData||"";
+  const src=useMediaSrc(chatId,msg,msg.fileUrl||msg.fileData||"",msg.type==="video"?"video":msg.type==="image"?"image":"file");
 
   // Оболочка файла: сохранён офлайн без загрузки (тип "Только текстовые"
   // или файл превысил лимит размера). Показываем как есть, без скачивания.
@@ -3209,7 +3154,7 @@ function FileBubble({msg,fromMe,onOpenLightbox}){
         <div style={{width:44,height:44,borderRadius:12,
           background:fromMe?"rgba(255,255,255,0.14)":accent+"22",
           display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-          <span style={{fontSize:20}}>📎</span>
+          <IcPaperclip size={20} color={fromMe?"#fff":accent}/>
         </div>
         <div style={{flex:1,minWidth:0}}>
           <div style={{color:fromMe?"rgba(255,255,255,0.9)":text,fontSize:13,fontWeight:600,
@@ -3344,7 +3289,7 @@ function ReplyInBubble({msg,fromMe}){
           }
         </div>
       )}
-      {isVoice&&<span style={{fontSize:16}}>🎙</span>}
+      {isVoice&&<IcMic size={15} color={fromMe?"rgba(255,255,255,0.75)":accent}/>}
       <div style={{flex:1,minWidth:0}}>
         <div style={{color:fromMe?"rgba(255,255,255,0.75)":accent,fontSize:11,fontWeight:700,marginBottom:1}}>{msg.author}</div>
         <div style={{color:fromMe?"rgba(255,255,255,0.55)":text2,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}}>{preview}</div>
@@ -4476,7 +4421,7 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
           animation:"fadeUp 0.4s ease 0.15s both"}}>
           <div style={{display:"flex",alignItems:"center",gap:12,padding:"13px 16px",
             borderBottom:`1px solid ${border}`}}>
-            <span style={{fontSize:20}}>🏷️</span>
+            <IcTag size={20} color={profileAccent}/>
             <div>
               <div style={{color:text2,fontSize:11,fontWeight:600,letterSpacing:0.5}}>Username</div>
               <div style={{color:profileAccent,fontSize:15,fontWeight:600,marginTop:2}}>@{user.tag}</div>
@@ -4919,7 +4864,7 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
 
         <div style={{background:surface,borderRadius:16,overflow:"hidden",marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",gap:12,padding:"13px 16px",borderBottom:`1px solid ${border}`}}>
-            <span style={{fontSize:20}}>🔗</span>
+            <IcLink size={20} color={tone}/>
             <div style={{minWidth:0}}>
               <div style={{color:text2,fontSize:11,fontWeight:700}}>Ссылка</div>
               <div style={{color:tone,fontSize:13,fontWeight:700,wordBreak:"break-all",marginTop:2}}>{inviteLink}</div>
@@ -5003,7 +4948,7 @@ class ChatErrorBoundary extends React.Component {
     if(this.state.crashed){
       return(
         <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"#0E0E0E",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,zIndex:100}}>
-          <div style={{fontSize:48}}>⚠️</div>
+          <IcWarning size={48} color="#ff6b6b"/>
           <div style={{color:"#fff",fontWeight:700,fontSize:18}}>Ошибка чата</div>
           <div style={{color:"#aaa",fontSize:12,maxWidth:"80%",textAlign:"center",marginTop:8}}>{this.state.errorMsg}</div>
           <button onClick={()=>{this.setState({crashed:false});this.props.onBack();}} style={{background:"#2AABEE",border:"none",borderRadius:14,padding:"12px 28px",color:"#fff",fontWeight:700,fontSize:15,cursor:"pointer"}}>← Назад</button>
@@ -5288,10 +5233,10 @@ function Lightbox({src,fileName,fileType,originRect,onClose}){
             style={{background:"#1a1a1a",borderRadius:20,padding:28,textAlign:"center",width:"100%",maxWidth:320,
               transform:inPhase?"scale(1)":"scale(0.92)",
               transition:"transform 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}>
-            <div style={{fontSize:52,marginBottom:16}}>🎵</div>
+            <div style={{marginBottom:16,display:"flex",justifyContent:"center"}}><IcMusicNote size={52} color="#E53935"/></div>
             <div style={{color:"#fff",fontWeight:600,fontSize:15,marginBottom:20,wordBreak:"break-word"}}>{fileName}</div>
             <audio src={src} controls style={{width:"100%"}}/>
-            <button onClick={download} disabled={downloading} style={{marginTop:16,background:"#E53935",border:"none",borderRadius:14,padding:"12px 24px",color:"#fff",fontSize:14,fontWeight:700,cursor:downloading?"default":"pointer",width:"100%",opacity:downloading?0.6:1,transition:"opacity 0.2s"}}>{downloading?"⏳ Сохраняем…":"⬇ Скачать"}</button>
+            <button onClick={download} disabled={downloading} style={{marginTop:16,background:"#E53935",border:"none",borderRadius:14,padding:"12px 24px",color:"#fff",fontSize:14,fontWeight:700,cursor:downloading?"default":"pointer",width:"100%",opacity:downloading?0.6:1,transition:"opacity 0.2s",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>{downloading?"Сохраняем…":(<><IcAudioDownload size={16}/>Скачать</>)}</button>
           </div>
         </div>
       )}
@@ -5505,8 +5450,22 @@ function Screen({children,dir="right"}){
 
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
+// Поле экрана входа: иконка + нижняя линия. Обязательно объявлен вне
+// AuthScreen — если такой компонент создаётся заново на каждый рендер,
+// React считает его "другим" компонентом и пересоздаёт <input> в DOM при
+// каждом нажатии клавиши, из-за чего слетает фокус и закрывается клавиатура.
+function AuthField({icon,children}){
+  return(
+    <div className="rmg-auth-field" style={{display:"flex",alignItems:"center",gap:12,borderBottom:"1.5px solid #2a2a2e",padding:"10px 2px"}}>
+      <span style={{color:"#8f8f96",display:"flex",flexShrink:0}}>{icon}</span>
+      {children}
+    </div>
+  );
+}
 function AuthScreen({onAuth}){
-  const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
+  // Экран входа всегда монохромный (тёмный фон, белые акценты) — не зависит
+  // от темы приложения: свою тему пользователь выбирает уже после входа.
+  const bg="#0a0a0a",border="#2a2a2e",text="#ffffff",text2="#8f8f96",accent="#ffffff",accent2="#ffffff",surface2="#18181b";
   const[mode,setMode]=useState("login");
   const[name,setName]=useState(""),[ email,setEmail]=useState(""),[ pass,setPass]=useState(""),[ tag,setTag]=useState(""),[ loginId,setLoginId]=useState(""),[ code,setCode]=useState(""),[ err,setErr]=useState(""),[ info,setInfo]=useState(""),[ loading,setLoading]=useState(false),[ showPass,setShowPass]=useState(false),[ showHelp,setShowHelp]=useState(false),[ helpClosing,setHelpClosing]=useState(false),[ pendingEmail,setPendingEmail]=useState("");
   const pendingProfile=useRef(null);
@@ -5566,7 +5525,10 @@ function AuthScreen({onAuth}){
     }
     setLoading(false);
   };
-  const inp={background:surface2,border:`1.5px solid ${border}`,borderRadius:14,padding:"13px 15px",color:text,fontSize:15,outline:"none",fontFamily:"inherit",width:"100%",boxSizing:"border-box",transition:"border-color 0.2s"};
+  // Поле ввода — просто нижняя линия + иконка слева, без рамки-коробки
+  const inp={background:"transparent",border:"none",padding:"2px 0",color:text,fontSize:15.5,outline:"none",fontFamily:"inherit",width:"100%",boxSizing:"border-box"};
+  const focusField=e=>{e.currentTarget.parentElement.style.borderColor=accent;};
+  const blurField=e=>{e.currentTarget.parentElement.style.borderColor=border;};
   const[authOnline,setAuthOnline]=useState(navigator.onLine);
   useEffect(()=>{
     const up=()=>setAuthOnline(true),dn=()=>setAuthOnline(false);
@@ -5575,53 +5537,70 @@ function AuthScreen({onAuth}){
   },[]);
   const canSubmit=mode==="login"?!!(loginId.trim()&&pass):mode==="register"?!!(name.trim()&&email.trim()&&pass):mode==="verify"?code.trim().length===6:mode==="reset"?!!(loginId.trim()||email.trim()):mode==="reset_confirm"?!!(code.trim().length===6&&pass.length>=6):!!email.trim();
   return(
-    <div onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{minHeight:"100vh",background:bg,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}}>
+    <div onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{minHeight:"100vh",background:bg,position:"relative",overflow:"hidden"}}>
+      <style>{`.rmg-auth-field{transition:border-color 0.2s}`}</style>
       {!authOnline&&<OfflineBar fixed/>}
-      <div onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{background:surface,borderRadius:24,padding:"32px 22px",width:"100%",maxWidth:380,border:`1px solid ${border}`,boxShadow:"0 24px 80px rgba(0,0,0,0.55)",animation:"fadeIn 0.4s ease"}}>
-        <div style={{textAlign:"center",marginBottom:24}}>
-          <div style={{width:68,height:68,borderRadius:20,background:"linear-gradient(145deg,#1a0000,#060000)",border:`1.5px solid ${accent}88`,margin:"0 auto 12px",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 6px 26px ${accent}55`}}>
-            <svg width="42" height="42" viewBox="0 0 80 80" fill="none">
+      {/* Мягкое радиальное свечение сверху — акцентным цветом темы */}
+      <div style={{position:"absolute",top:-120,left:"50%",transform:"translateX(-50%)",width:520,height:420,background:`radial-gradient(closest-side, ${accent}30, transparent)`,pointerEvents:"none"}}/>
+      <div onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{position:"relative",maxWidth:400,margin:"0 auto",padding:"64px 24px 40px",animation:"fadeIn 0.4s ease"}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:30}}>
+          <div style={{width:44,height:44,borderRadius:13,background:"linear-gradient(145deg,#1a0000,#060000)",border:"1.5px solid #FF000088",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 6px 20px #FF000044"}}>
+            <svg width="26" height="26" viewBox="0 0 80 80" fill="none">
               <defs><linearGradient id="authLogoGrad" x1="0" y1="0" x2="80" y2="80" gradientUnits="userSpaceOnUse"><stop offset="0%" stopColor="#FF4444"/><stop offset="50%" stopColor="#FF0000"/><stop offset="100%" stopColor="#CC0000"/></linearGradient></defs>
-              <path d="M8 68 L8 20 L24 20 L40 48 L56 20 L72 20 L72 68 L60 68 L60 38 L44 64 L36 64 L20 38 L20 68 Z" fill="url(#authLogoGrad)" style={{filter:"drop-shadow(0 0 6px rgba(255,0,0,0.7))"}}/>
+              <path d="M8 68 L8 20 L24 20 L40 48 L56 20 L72 20 L72 68 L60 68 L60 38 L44 64 L36 64 L20 38 L20 68 Z" fill="url(#authLogoGrad)"/>
             </svg>
           </div>
-          <div style={{color:text,fontWeight:800,fontSize:24}}>MrX</div>
-          <div key={"sub-"+mode} style={{color:text2,fontSize:13,marginTop:4,animation:"authFadeSlide 0.32s cubic-bezier(0.22,0.61,0.36,1) both"}}>{mode==="login"?"Войди в аккаунт":mode==="register"?"Создай аккаунт":mode==="verify"?"Подтверди почту":mode==="reset"?"Сброс пароля":mode==="reset_confirm"?"Новый пароль":"Привяжи почту"}</div>
+          <div>
+            <div style={{color:text,fontWeight:800,fontSize:21,lineHeight:1.15}}>MrX</div>
+            <div key={"sub-"+mode} style={{color:text2,fontSize:12.5,animation:"authFadeSlide 0.32s cubic-bezier(0.22,0.61,0.36,1) both"}}>{mode==="login"?"Войди в аккаунт":mode==="register"?"Создай аккаунт":mode==="verify"?"Подтверди почту":mode==="reset"?"Сброс пароля":mode==="reset_confirm"?"Новый пароль":"Привяжи почту"}</div>
+          </div>
         </div>
-        {mode==="register"&&<div style={{display:"flex",justifyContent:"center",marginBottom:18}}><Avatar name={name||"?"} size={70}/></div>}
-        <div key={"fields-"+mode} onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{display:"flex",flexDirection:"column",gap:10,marginBottom:12,animation:(modeAnim==="out"?"authFadeOutUp 0.16s ease both":"authFieldIn 0.32s cubic-bezier(0.22,0.61,0.36,1) both")}}>
+        {(mode==="login"||mode==="register")&&(
+          <div style={{position:"relative",display:"flex",background:surface2,borderRadius:999,padding:4,marginBottom:26}}>
+            <div style={{position:"absolute",top:4,bottom:4,left:4,width:"calc(50% - 4px)",borderRadius:999,background:"#fff",transition:"transform 0.32s cubic-bezier(0.65,0,0.35,1)",transform:mode==="register"?"translateX(100%)":"translateX(0)"}}/>
+            <button onClick={()=>{switchMode("login");setErr("");setInfo("");}} style={{flex:1,position:"relative",zIndex:1,padding:"11px 0",border:"none",background:"none",borderRadius:999,fontFamily:"inherit",fontSize:14,fontWeight:700,cursor:"pointer",color:mode==="login"?"#0a0a0a":text2,transition:"color 0.25s"}}>Вход</button>
+            <button onClick={()=>{switchMode("register");setErr("");setInfo("");}} style={{flex:1,position:"relative",zIndex:1,padding:"11px 0",border:"none",background:"none",borderRadius:999,fontFamily:"inherit",fontSize:14,fontWeight:700,cursor:"pointer",color:mode==="register"?"#0a0a0a":text2,transition:"color 0.25s"}}>Регистрация</button>
+          </div>
+        )}
+        {mode==="register"&&<div style={{display:"flex",justifyContent:"center",marginBottom:18}}><Avatar name={name||"?"} size={64}/></div>}
+        <div key={"fields-"+mode} onMouseDown={e=>{if(e.target===e.currentTarget)e.preventDefault();}} style={{display:"flex",flexDirection:"column",gap:16,marginBottom:14,animation:(modeAnim==="out"?"authFadeOutUp 0.16s ease both":"authFieldIn 0.32s cubic-bezier(0.22,0.61,0.36,1) both")}}>
           {mode==="register"&&<>
-            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Имя" style={inp} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
-            <div style={{display:"flex",alignItems:"center",background:surface2,border:`1.5px solid ${border}`,borderRadius:14,overflow:"hidden"}}>
-              <span style={{color:accent,padding:"0 13px",fontSize:16,fontWeight:700}}>@</span>
-              <input value={tag} onChange={e=>setTag(e.target.value.replace(/^@/,"").replace(/\s/,""))} placeholder="твой_тег (это твой логин!)" style={{flex:1,background:"none",border:"none",padding:"13px 8px 13px 0",color:text,fontSize:15,outline:"none",fontFamily:"inherit"}}/>
-            </div>
-            <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Почта (на неё придёт код)" type="email" style={inp} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
+            <AuthField icon={<IcUserAuth size={19}/>}><input value={name} onChange={e=>setName(e.target.value)} placeholder="Отображаемое имя" style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>
+            <AuthField icon={<span style={{fontSize:17,fontWeight:700}}>@</span>}><input value={tag} onChange={e=>setTag(e.target.value.replace(/^@/,"").replace(/\s/,""))} placeholder="Имя пользователя" style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>
+            <AuthField icon={<IcMailAuth size={18}/>}><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>
           </>}
-          {mode==="login"&&<input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="@юзернейм или почта" type="text" style={inp} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>}
-          {mode==="reset"&&<input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="@юзернейм или почта" type="text" style={inp} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>}
+          {mode==="login"&&<AuthField icon={<IcMailAuth size={18}/>}><input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="Email" type="text" style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>}
+          {mode==="reset"&&<AuthField icon={<IcMailAuth size={18}/>}><input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="@юзернейм или почта" type="text" style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>}
           {mode==="reset_confirm"&&<>
-            <div style={{color:text2,fontSize:13,lineHeight:1.55,textAlign:"center"}}>Код отправлен на<br/><b style={{color:text}}>{resetEmail}</b><br/>Письма нет? Загляни в папку «Спам».</div>
-            <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="••••••" inputMode="numeric" onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,textAlign:"center",letterSpacing:8,fontSize:22,fontWeight:800}} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
-            <input value={pass} onChange={e=>setPass(e.target.value)} placeholder="Новый пароль (мин. 6 символов)" type={showPass?"text":"password"} onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,paddingRight:46}} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
+            <div style={{color:text2,fontSize:13,lineHeight:1.55}}>Код отправлен на<br/><b style={{color:text}}>{resetEmail}</b><br/>Письма нет? Загляни в папку «Спам».</div>
+            <AuthField icon={<IcCircleOutline size={18}/>}><input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="Код из письма" inputMode="numeric" onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,letterSpacing:6,fontSize:19,fontWeight:800}} onFocus={focusField} onBlur={blurField}/></AuthField>
+            <AuthField icon={<IcLockAuth size={18}/>}>
+              <input value={pass} onChange={e=>setPass(e.target.value)} placeholder="Новый пароль (мин. 6 символов)" type={showPass?"text":"password"} onKeyDown={e=>e.key==="Enter"&&submit()} style={inp} onFocus={focusField} onBlur={blurField}/>
+              <button onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPass(s=>!s)} style={{background:"none",border:"none",cursor:"pointer",color:text2,display:"flex",alignItems:"center",flexShrink:0}}>{showPass?<IcEyeOff size={17}/>:<IcEye size={17}/>}</button>
+            </AuthField>
           </>}
           {mode==="attach"&&<>
             <div style={{color:text2,fontSize:13,lineHeight:1.55}}>Теперь для входа нужна почта — это защита от фейков. Укажи её один раз: придёт код подтверждения, и дальше входи как обычно (по @юзернейму или почте).</div>
-            <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Твоя почта" type="email" onKeyDown={e=>e.key==="Enter"&&submit()} style={inp} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
+            <AuthField icon={<IcMailAuth size={18}/>}><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Твоя почта" type="email" onKeyDown={e=>e.key==="Enter"&&submit()} style={inp} onFocus={focusField} onBlur={blurField}/></AuthField>
           </>}
           {mode==="verify"&&<>
-            <div style={{color:text2,fontSize:13,lineHeight:1.55,textAlign:"center"}}>Мы отправили 6-значный код на<br/><b style={{color:text}}>{pendingEmail}</b><br/>Письма нет? Загляни в папку «Спам».</div>
-            <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="••••••" inputMode="numeric" onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,textAlign:"center",letterSpacing:8,fontSize:22,fontWeight:800}} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
+            <div style={{color:text2,fontSize:13,lineHeight:1.55}}>Мы отправили 6-значный код на<br/><b style={{color:text}}>{pendingEmail}</b><br/>Письма нет? Загляни в папку «Спам».</div>
+            <AuthField icon={<IcCircleOutline size={18}/>}><input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="Код из письма" inputMode="numeric" onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,letterSpacing:6,fontSize:19,fontWeight:800}} onFocus={focusField} onBlur={blurField}/></AuthField>
           </>}
-          {(mode==="login"||mode==="register")&&<div style={{position:"relative"}}>
-            <input value={pass} onChange={e=>setPass(e.target.value)} placeholder="Пароль" type={showPass?"text":"password"} onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp,paddingRight:46}} onFocus={e=>e.target.style.borderColor=accent} onBlur={e=>e.target.style.borderColor=border}/>
-            <button onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPass(s=>!s)} style={{position:"absolute",right:13,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:text2,fontSize:15}}>{showPass?"🙈":"👁"}</button>
-          </div>}
+          {(mode==="login"||mode==="register")&&(
+            <AuthField icon={<IcLockAuth size={18}/>}>
+              <input value={pass} onChange={e=>setPass(e.target.value)} placeholder="Пароль" type={showPass?"text":"password"} onKeyDown={e=>e.key==="Enter"&&submit()} style={inp} onFocus={focusField} onBlur={blurField}/>
+              <button onMouseDown={e=>e.preventDefault()} onClick={()=>setShowPass(s=>!s)} style={{background:"none",border:"none",cursor:"pointer",color:text2,display:"flex",alignItems:"center",flexShrink:0}}>{showPass?<IcEyeOff size={17}/>:<IcEye size={17}/>}</button>
+            </AuthField>
+          )}
         </div>
-        {info&&<div style={{background:"#00c85315",border:"1px solid #00c85333",borderRadius:12,padding:"9px 13px",color:"#7be3a3",fontSize:13,marginBottom:10}}>✉️ {info}</div>}
-        {err&&<div style={{background:"#ff00001a",border:"1px solid #ff000033",borderRadius:12,padding:"9px 13px",color:"#ff6b6b",fontSize:13,marginBottom:10,animation:"shake 0.3s ease"}}>⚠️ {err}</div>}
-        <button onClick={submit} disabled={loading||!canSubmit} style={{width:"100%",padding:14,background:canSubmit?`linear-gradient(135deg,${accent},${accent2})`:surface2,border:"none",borderRadius:14,color:"#fff",fontSize:15,fontWeight:700,cursor:canSubmit?"pointer":"default",boxShadow:canSubmit?`0 4px 22px ${accent}55`:"none",fontFamily:"inherit",marginBottom:14,transition:"transform 0.15s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.2s",animation:(canSubmit&&!loading)?"authBtnPulse 2.6s ease-in-out infinite":"none"}} onMouseDown={e=>{e.preventDefault();if(canSubmit)e.currentTarget.style.transform="scale(0.96)";}} onMouseUp={e=>e.currentTarget.style.transform="scale(1)"} onTouchStart={e=>{if(canSubmit)e.currentTarget.style.transform="scale(0.96)";}} onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}>
-          {loading?"⏳":mode==="login"?"Войти →":mode==="register"?"Создать 🚀":mode==="verify"?"Подтвердить ✅":mode==="reset"?"Отправить код 📧":mode==="reset_confirm"?"Сохранить пароль 🔑":"Получить код 📧"}
+        {mode==="login"&&<div style={{textAlign:"right",marginTop:-8,marginBottom:18}}>
+          <span onMouseDown={e=>e.preventDefault()} onClick={()=>{setLoginId("");setPass("");setErr("");setInfo("");switchMode("reset");}} style={{color:text2,fontSize:12.5,cursor:"pointer"}}>Забыли пароль?</span>
+        </div>}
+        {info&&<div style={{background:"#00c85315",border:"1px solid #00c85333",borderRadius:12,padding:"9px 13px",color:"#7be3a3",fontSize:13,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><IcSend size={14}/>{info}</div>}
+        {err&&<div style={{background:"#ff00001a",border:"1px solid #ff000033",borderRadius:12,padding:"9px 13px",color:"#ff6b6b",fontSize:13,marginBottom:14,animation:"shake 0.3s ease",display:"flex",alignItems:"center",gap:8}}><IcWarning size={14} color="#ff6b6b"/>{err}</div>}
+        <button onClick={submit} disabled={loading||!canSubmit} style={{width:"100%",padding:16,background:canSubmit?"#fff":surface2,border:"none",borderRadius:16,color:canSubmit?"#0a0a0a":text2,fontSize:15,fontWeight:800,cursor:canSubmit?"pointer":"default",fontFamily:"inherit",marginBottom:18,transition:"transform 0.15s cubic-bezier(0.34,1.56,0.64,1), background 0.2s"}} onMouseDown={e=>{e.preventDefault();if(canSubmit)e.currentTarget.style.transform="scale(0.97)";}} onMouseUp={e=>e.currentTarget.style.transform="scale(1)"} onTouchStart={e=>{if(canSubmit)e.currentTarget.style.transform="scale(0.97)";}} onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}>
+          {loading?"Подождите…":mode==="login"?"Войти":mode==="register"?"Зарегистрироваться":mode==="verify"?"Подтвердить":mode==="reset"?"Отправить код":mode==="reset_confirm"?"Сохранить пароль":"Получить код"}
         </button>
         {mode==="register"&&<div style={{color:text2,fontSize:12,textAlign:"center",marginBottom:10}}>Запомни свой @юзернейм — по нему будешь входить</div>}
         {mode==="verify"&&<div style={{textAlign:"center",marginBottom:10,display:"flex",flexDirection:"column",gap:8}}>
@@ -5634,39 +5613,34 @@ function AuthScreen({onAuth}){
           <span onMouseDown={e=>e.preventDefault()} onClick={()=>{switchMode("login");setErr("");setInfo("");}} style={{color:text2,fontSize:13,cursor:"pointer"}}>← Назад ко входу</span>
         </div>}
         {(mode==="login"||mode==="register")&&<>
-        <div style={{display:"flex",alignItems:"center",gap:8,margin:"10px 0"}}>
-          <div style={{flex:1,height:1,background:border}}/><span style={{color:text2,fontSize:11}}>или</span><div style={{flex:1,height:1,background:border}}/>
+        <div style={{display:"flex",alignItems:"center",gap:10,margin:"6px 0 20px"}}>
+          <div style={{flex:1,height:1,background:border}}/><span style={{color:text2,fontSize:12}}>или войдите через</span><div style={{flex:1,height:1,background:border}}/>
         </div>
-        <button onClick={async()=>{
-          setErr("");setLoading(true);
-          try{
-            const cred=await signInAnonymously(auth);
-            const anonName="Гость"+(Math.floor(1000+Math.random()*9000));
-            const anonTag="guest"+Math.floor(10000+Math.random()*90000);
-            const prof={uid:cred.user.uid,name:anonName,email:"",tag:anonTag,bio:"Анонимный пользователь",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp(),isAnonymous:true};
-            const snap=await getDoc(doc(db,"users",cred.user.uid));
-            if(!snap.exists())await setDoc(doc(db,"users",cred.user.uid),prof);
-            onAuth(cred.user,snap.exists()?snap.data():prof,true);
-          }catch(e){setErr(e.message);}
-          setLoading(false);
-        }} style={{width:"100%",padding:13,background:surface2,border:`1px solid ${border}`,borderRadius:14,color:text2,fontSize:14,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8,transition:"all 0.2s"}}
-          onMouseDown={e=>{e.preventDefault();e.currentTarget.style.transform="scale(0.97)";}}
-          onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}>
-          <IcGhost size={18}/><span>Войти анонимно</span>
-        </button>
-        <div style={{textAlign:"center"}}>
-          <span style={{color:text2,fontSize:13}}>{mode==="login"?"Нет аккаунта? ":"Уже есть? "}</span>
-          <span onClick={()=>{switchMode(mode==="login"?"register":"login");setErr("");setInfo("");}} style={{color:accent,fontSize:13,cursor:"pointer",fontWeight:700,transition:"opacity 0.15s"}} onMouseDown={e=>{e.preventDefault();e.currentTarget.style.opacity="0.55";}} onMouseUp={e=>e.currentTarget.style.opacity="1"}>{mode==="login"?"Зарегистрироваться":"Войти"}</span>
+        <div style={{display:"flex",justifyContent:"center",marginBottom:22}}>
+          <button onClick={async()=>{
+            setErr("");setLoading(true);
+            try{
+              const cred=await signInAnonymously(auth);
+              const anonName="Гость"+(Math.floor(1000+Math.random()*9000));
+              const anonTag="guest"+Math.floor(10000+Math.random()*90000);
+              const prof={uid:cred.user.uid,name:anonName,email:"",tag:anonTag,bio:"Анонимный пользователь",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp(),isAnonymous:true};
+              const snap=await getDoc(doc(db,"users",cred.user.uid));
+              if(!snap.exists())await setDoc(doc(db,"users",cred.user.uid),prof);
+              onAuth(cred.user,snap.exists()?snap.data():prof,true);
+            }catch(e){setErr(e.message);}
+            setLoading(false);
+          }} title="Войти анонимно" style={{width:56,height:56,borderRadius:"50%",background:"#fff",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.2s"}}
+            onMouseDown={e=>{e.preventDefault();e.currentTarget.style.transform="scale(0.93)";}}
+            onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}>
+            <IcGhost size={24} color="#0a0a0a"/>
+          </button>
         </div>
-        {mode==="login"&&<div style={{textAlign:"center",marginTop:4}}>
-          <span onMouseDown={e=>e.preventDefault()} onClick={()=>{setLoginId("");setPass("");setErr("");setInfo("");switchMode("reset");}} style={{color:text2,fontSize:12.5,cursor:"pointer",textDecoration:"underline"}}>Забыл пароль?</span>
-        </div>}
-        <div style={{textAlign:"center",marginTop:12}}>
+        <div style={{textAlign:"center",marginTop:-10}}>
           <span onMouseDown={e=>e.preventDefault()} onClick={()=>{if(showHelp){setHelpClosing(true);setTimeout(()=>{setShowHelp(false);setHelpClosing(false);},440);}else{setShowHelp(true);}}} style={{color:text2,fontSize:12,cursor:"pointer",textDecoration:"underline",display:"inline-flex",alignItems:"center",gap:4,transition:"color 0.2s"}}><IcHelpQ size={13}/> Как войти? <span style={{display:"inline-block",transition:"transform 0.3s cubic-bezier(0.34,1.56,0.64,1)",transform:(showHelp&&!helpClosing)?"rotate(180deg)":"rotate(0deg)",fontSize:10}}>▾</span></span>
           {showHelp&&<div style={{textAlign:"left",background:surface2,border:`1px solid ${border}`,borderRadius:12,padding:"11px 13px",color:text2,fontSize:12.5,lineHeight:1.6,marginTop:8,overflow:"hidden",animation:helpClosing?"authHelpClose 0.45s cubic-bezier(0.65,0,0.35,1) both":"authHelpOpen 0.55s cubic-bezier(0.32,0.72,0,1) both",transformOrigin:"top center"}}>
-            <b style={{color:text}}>Впервые здесь?</b><br/>1. Нажми «Зарегистрироваться»<br/>2. Придумай имя, @юзернейм и пароль, укажи свою почту<br/>3. Введи код из письма — и готово!<br/><br/>
+            <b style={{color:text}}>Впервые здесь?</b><br/>1. Нажми «Регистрация» вверху<br/>2. Придумай имя, @юзернейм и пароль, укажи свою почту<br/>3. Введи код из письма — и готово!<br/><br/>
             <b style={{color:text}}>Уже есть аккаунт?</b><br/>Вводи свой @юзернейм (он написан в твоём профиле) или почту — и пароль.<br/><br/>
-            <b style={{color:text}}>Забыл юзернейм?</b><br/>Просто войди по почте.<br/><br/><b style={{color:text}}>Забыл пароль?</b><br/>Нажми «Забыл пароль?» ниже — введи @юзернейм или почту, получи код, придумай новый пароль.
+            <b style={{color:text}}>Забыл юзернейм?</b><br/>Просто войди по почте.<br/><br/><b style={{color:text}}>Забыл пароль?</b><br/>Нажми «Забыли пароль?» над кнопкой входа — введи @юзернейм или почту, получи код, придумай новый пароль.
           </div>}
         </div>
         </>}
@@ -5766,7 +5740,7 @@ function EditProfile({currentUser,profile,onSave,onClose}){
             <input ref={fileRef} type="file" accept="image/*" onChange={pickPhoto} style={{display:"none"}}/>
             {uploading&&<div style={{marginTop:8,color:text2,fontSize:12}}>Загрузка {uploadPct}%</div>}
           </div>
-          {err&&<div style={{background:"rgba(229,57,53,0.14)",border:"1.5px solid #E53935",borderRadius:13,padding:"10px 14px",color:"#E53935",fontSize:13,marginBottom:14,wordBreak:"break-word",whiteSpace:"pre-wrap"}}>⚠️ {err}</div>}
+          {err&&<div style={{background:"rgba(229,57,53,0.14)",border:"1.5px solid #E53935",borderRadius:13,padding:"10px 14px",color:"#E53935",fontSize:13,marginBottom:14,wordBreak:"break-word",whiteSpace:"pre-wrap",display:"flex",alignItems:"flex-start",gap:8}}><IcWarning size={14} color="#E53935"/><span>{err}</span></div>}
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             <div><label style={{color:text2,fontSize:11,fontWeight:600,marginBottom:5,display:"block",letterSpacing:0.5}}>ИМЯ</label>
               <input value={name} onChange={e=>setName(e.target.value)} style={{width:"100%",background:surface2,border:`1.5px solid ${border}`,borderRadius:13,padding:"12px 15px",color:text,fontSize:15,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
@@ -5791,7 +5765,7 @@ function EditProfile({currentUser,profile,onSave,onClose}){
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 // ─── Message ─────────────────────────────────────────────────────────────────
-function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,idx}){
+function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,idx,audioMsgs,chatId}){
   const {accent,accent2,surface2,text,text2,bg}=useContext(ThemeCtx);
   const fromMe=msg.uid===myUid;
   const showAvatar=!fromMe&&msg.uid!==prevMsg?.uid;
@@ -5903,7 +5877,7 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   const renderContent=()=>{
     if(isCircle)return(
       <div onTouchStart={onPStart} onTouchMove={onPMove} onTouchEnd={onPEnd} onMouseDown={onPStart} onMouseUp={onPEnd}>
-        <CircleBubble msg={msg} onFullscreen={onCircleFs}/>
+        <CircleBubble msg={msg} onFullscreen={onCircleFs} chatId={chatId}/>
       </div>
     );
     if(isSticker)return(
@@ -5940,10 +5914,10 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
             })}
           </div>
         )}
-        {msg.type==="voice"?<VoiceBubble msg={msg} fromMe={fromMe}/>
-          :msg.type==="audio"?<AudioBubble msg={msg} fromMe={fromMe}/>
-          :msg.type==="image"||msg.type==="file"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox}/>
-          :msg.type==="video"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox}/>
+        {msg.type==="voice"?<VoiceBubble msg={msg} fromMe={fromMe} chatId={chatId}/>
+          :msg.type==="audio"?<AudioBubble msg={msg} fromMe={fromMe} audioMsgs={audioMsgs} chatId={chatId}/>
+          :msg.type==="image"||msg.type==="file"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox} chatId={chatId}/>
+          :msg.type==="video"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox} chatId={chatId}/>
           :msg.text}
       </div>
     );
@@ -6637,10 +6611,10 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
         {/* Контактные блоки — wider maxWidth + flexShrink, чтобы все 4 пункта помещались целиком */}
         <div style={{width:"100%",maxWidth:360,background:surface,borderRadius:18,overflow:"hidden",border:`1px solid ${border}`}}>
           {[
-            {ico:"🌐",lbl:"Сайт",url:"https://redmrxgram.work.gd",display:"redmrxgram.work.gd"},
-            {ico:"✈️",lbl:"Канал",url:"https://t.me/redmrxgram",display:"t.me/redmrxgram"},
-            {ico:"🎵",lbl:"TikTok",url:"https://tiktok.com/@redmrxgram",display:"tiktok.com/@redmrxgram"},
-            {ico:"🤖",lbl:"Бот",url:"https://t.me/redmrx_bot",display:"t.me/redmrx_bot"},
+            {Ico:IcGlobe,lbl:"Сайт",url:"https://redmrxgram.work.gd",display:"redmrxgram.work.gd"},
+            {Ico:IcSend,lbl:"Канал",url:"https://t.me/redmrxgram",display:"t.me/redmrxgram"},
+            {Ico:IcMusicNote,lbl:"TikTok",url:"https://tiktok.com/@redmrxgram",display:"tiktok.com/@redmrxgram"},
+            {Ico:IcRobot,lbl:"Бот",url:"https://t.me/redmrx_bot",display:"t.me/redmrx_bot"},
           ].map((r,i,arr)=>(
             <a key={i} href={r.url} target="_blank" rel="noopener noreferrer"
               style={{display:"flex",alignItems:"center",gap:14,padding:"13px 16px",
@@ -6648,7 +6622,7 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
                 textDecoration:"none",WebkitTapHighlightColor:"transparent"}}
               onTouchStart={e=>e.currentTarget.style.background=surface2}
               onTouchEnd={e=>e.currentTarget.style.background="transparent"}>
-              <span style={{fontSize:20,width:28,textAlign:"center",flexShrink:0}}>{r.ico}</span>
+              <span style={{width:28,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,color:accent}}><r.Ico size={20}/></span>
               <div style={{flex:1,minWidth:0,textAlign:"left"}}>
                 <div style={{color:text,fontSize:13,fontWeight:600}}>{r.lbl}</div>
                 <div style={{color:"#2AABEE",fontSize:12,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.display}</div>
@@ -6700,7 +6674,8 @@ function AudioFullPlayerOverlay(){
 // AudioMiniBar — renders MiniPlayer inline in screen layouts (below headers)
 function AudioMiniBar(){
   const audio=useContext(AudioCtx);
-  if(!audio||!audio.track)return null;
+  if(!audio)return null;
+  if(audio.miniPhase==="hidden")return null;
   return <MiniPlayer/>;
 }
 
@@ -6708,10 +6683,20 @@ function AudioMiniBar(){
 function MiniPlayer(){
   const {surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
-  if(!audio||!audio.track)return null;
-  const {track,playing,progress,openFullPlayer,closeMini,play,pause,next,prev,queue,idx}=audio;
+  if(!audio)return null;
+  const phase=audio.miniPhase; // entering|shown|exiting
+  const snap=audio.miniSnap;
+  const live=audio.track?audio:null;
+  const track=live?live.track:snap?.track;
+  if(!track)return null;
+  const playing=live?live.playing:(snap?.playing||false);
+  const progress=live?live.progress:(snap?.progress||0);
+  const queue=live?live.queue:(snap?.queue||[]);
+  const idx=live?live.idx:(snap?.idx||0);
+  const {openFullPlayer,closeMini,play,pause,next,prev}=audio;
   const hasPrev=idx>0||(audio.repeat==="all"&&queue.length>1);
   const hasNext=idx<queue.length-1||(audio.repeat==="all"&&queue.length>1)||audio.shuffle;
+  const collapsed=phase==="entering"||phase==="exiting";
 
   return(
     <div style={{flexShrink:0,overflow:"hidden"}}>
@@ -6725,6 +6710,11 @@ function MiniPlayer(){
           backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",
           borderBottom:`1px solid ${border}`,
           cursor:"pointer",position:"relative",
+          pointerEvents:collapsed?"none":"auto",
+          opacity:collapsed?0:1,
+          transform:collapsed?"translateY(-100%) scale(0.96)":"translateY(0) scale(1)",
+          transformOrigin:"top center",
+          transition:"opacity 0.32s cubic-bezier(.32,.72,0,1),transform 0.32s cubic-bezier(.32,.72,0,1)",
         }}>
         {/* Album art */}
         <div style={{width:34,height:34,borderRadius:9,flexShrink:0,overflow:"hidden",
@@ -6734,7 +6724,7 @@ function MiniPlayer(){
         }}>
           {track.coverUrl
             ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-            :<span style={{fontSize:16}}>🎵</span>}
+            :<IcMusicNote size={16} color="#fff"/>}
         </div>
         {/* Info */}
         <div style={{flex:1,minWidth:0}}>
@@ -6748,29 +6738,31 @@ function MiniPlayer(){
         {/* Controls — stop propagation so taps on buttons don't open full player */}
         <div style={{display:"flex",alignItems:"center",gap:2,flexShrink:0}} onClick={e=>e.stopPropagation()}>
           {(hasPrev||hasNext)&&(
-            <button onClick={e=>{e.stopPropagation();prev();}}
+            <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();prev();}}
               style={{width:32,height:32,borderRadius:"50%",border:"none",cursor:"pointer",
-                background:"none",color:hasPrev?text:text2+"44",fontSize:14,
-                display:"flex",alignItems:"center",justifyContent:"center"}}>⏮</button>
+                background:"none",color:hasPrev?text:text2+"44",
+                display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioPrev size={18}/></button>
           )}
-          <button onClick={e=>{e.stopPropagation();playing?pause():play();}}
+          <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();playing?pause():play();}}
             style={{width:36,height:36,borderRadius:"50%",border:"none",cursor:"pointer",
               background:`linear-gradient(135deg,${accent},${accent2})`,
-              color:"#fff",fontSize:15,
+              color:"#fff",
               display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:`0 2px 8px ${accent}55`}}>
-            {playing?"⏸":"▶"}
+              boxShadow:`0 2px 8px ${accent}55`,
+              "--rmg-accent-a":`${accent}55`,"--rmg-accent-b":`${accent}44`,
+              animation:playing?"rmgPlayPulse 1.8s ease-out infinite":"none"}}>
+            {playing?<IcAudioPause size={18}/>:<IcAudioPlay size={18}/>}
           </button>
           {(hasPrev||hasNext)&&(
-            <button onClick={e=>{e.stopPropagation();next();}}
+            <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();next();}}
               style={{width:32,height:32,borderRadius:"50%",border:"none",cursor:"pointer",
-                background:"none",color:hasNext?text:text2+"44",fontSize:14,
-                display:"flex",alignItems:"center",justifyContent:"center"}}>⏭</button>
+                background:"none",color:hasNext?text:text2+"44",
+                display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioNext size={18}/></button>
           )}
-          <button onClick={e=>{e.stopPropagation();closeMini();}}
+          <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();closeMini();}}
             style={{width:32,height:32,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:"none",color:text2,fontSize:13,
-              display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+              background:"none",color:text2,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioClose size={16}/></button>
         </div>
       </div>
       {/* Progress line */}
@@ -6857,6 +6849,8 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
               opacity:isDragging?0.4:1,
               borderTop:isOver?`2px solid ${accent}`:"2px solid transparent",
               transition:"opacity 0.15s,border-color 0.1s,background 0.15s",
+              animation:`rmgRowIn 0.3s cubic-bezier(.22,1,.36,1) both`,
+              animationDelay:`${Math.min(i,8)*0.03}s`,
             }}>
             {/* Drag handle — касание только здесь начинает drag */}
             <div data-drag-handle style={{width:20,flexShrink:0,display:"flex",flexDirection:"column",
@@ -6868,15 +6862,16 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
             {/* Track icon */}
             <div style={{width:36,height:36,borderRadius:9,flexShrink:0,
               background:isActive?`linear-gradient(135deg,${accent},${accent2})`:surface2,
-              display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}
+              display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",
+              transition:"background 0.2s"}}
               onClick={()=>!isDragging&&isActive===false&&AUDIO_ENGINE.jumpTo(i)}>
-              {isActive?(playing?"▶":"⏸"):"🎵"}
+              {isActive?(playing?<IcAudioPause size={16}/>:<IcAudioPlay size={16}/>):<IcMusicNote size={15} color={text2}/>}
             </div>
             {/* Info */}
             <div style={{flex:1,minWidth:0}}
               onClick={()=>!isDragging&&!isActive&&AUDIO_ENGINE.jumpTo(i)}>
               <div style={{color:isActive?accent:text,fontSize:13,fontWeight:isActive?700:500,
-                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",transition:"color 0.2s"}}>
                 {t.name||"Аудио"}
               </div>
               <div style={{color:text2,fontSize:10,marginTop:1}}>
@@ -6884,10 +6879,10 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
               </div>
             </div>
             {/* Remove */}
-            <button onClick={e=>{e.stopPropagation();audio.removeFromQueue(i);}}
+            <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();audio.removeFromQueue(i);}}
               style={{width:28,height:28,borderRadius:"50%",border:"none",cursor:"pointer",
-                background:"none",color:text2,fontSize:14,flexShrink:0,
-                display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+                background:"none",color:text2,flexShrink:0,
+                display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioClose size={13}/></button>
           </div>
         );
       })}
@@ -6902,6 +6897,15 @@ function AudioPlayerScreen(){
   const [visible,setVisible]=useState(false);
   const [dragging,setDragging]=useState(false);
   const [showQueue,setShowQueue]=useState(false);
+  const [queueClosing,setQueueClosing]=useState(false);
+  const toggleQueue=()=>{
+    if(showQueue){
+      setQueueClosing(true);
+      setTimeout(()=>{setShowQueue(false);setQueueClosing(false);},260);
+    }else{
+      setShowQueue(true);
+    }
+  };
   const [buffered,setBuffered]=useState(0);
   const seekBarRef=useRef(null);
 
@@ -6991,7 +6995,6 @@ function AudioPlayerScreen(){
 
   const SPEEDS=[0.5,0.75,1,1.25,1.5,1.75,2];
   const nextRepeat=()=>audio.setRepeat(repeat==="off"?"all":repeat==="all"?"one":"off");
-  const repeatIcon=repeat==="one"?"🔂":repeat==="all"?"🔁":"🔁";
   const repeatActive=repeat!=="off";
 
   const close=()=>{setVisible(false);setTimeout(()=>audio.closeFullPlayer(),300);};
@@ -7017,9 +7020,9 @@ function AudioPlayerScreen(){
         paddingLeft:16,paddingRight:16,paddingBottom:10,
         flexShrink:0,position:"relative",zIndex:1,
       }}>
-        <button onClick={close} style={{width:36,height:36,borderRadius:"50%",border:"none",cursor:"pointer",
-          background:surface2,color:text,fontSize:20,display:"flex",alignItems:"center",justifyContent:"center"}}>
-          ⌄
+        <button className="rmg-audio-btn" onClick={close} style={{width:36,height:36,borderRadius:"50%",border:"none",cursor:"pointer",
+          background:surface2,color:text,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <IcChevronDown size={22}/>
         </button>
         <div style={{color:text,fontWeight:700,fontSize:15}}>Аудиоплеер</div>
         <div style={{width:36}}/>
@@ -7041,7 +7044,7 @@ function AudioPlayerScreen(){
           }}>
             {track.coverUrl
               ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              :<span style={{fontSize:72}}>🎵</span>}
+              :<IcMusicNote size={72} color="#fff"/>}
           </div>
         </div>
 
@@ -7096,34 +7099,36 @@ function AudioPlayerScreen(){
         {/* Main controls */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-evenly",
           padding:"8px 16px 16px"}}>
-          <button onClick={()=>audio.setShuffle(!shuffle)}
+          <button className={"rmg-audio-btn rmg-audio-toggle"+(shuffle?" on":"")} onClick={()=>audio.setShuffle(!shuffle)}
             style={{width:44,height:44,borderRadius:"50%",border:"none",cursor:"pointer",
               background:shuffle?accent+"22":"none",
-              color:shuffle?accent:text2,fontSize:20,
-              display:"flex",alignItems:"center",justifyContent:"center"}}>🔀</button>
-          <button onClick={()=>audio.prev()}
+              color:shuffle?accent:text2,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioShuffle size={20}/></button>
+          <button className="rmg-audio-btn" onClick={()=>audio.prev()}
             style={{width:52,height:52,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:surface2,color:text,fontSize:22,
-              display:"flex",alignItems:"center",justifyContent:"center"}}>⏮</button>
-          <button onClick={()=>playing?audio.pause():audio.play()}
+              background:surface2,color:text,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioPrev size={24}/></button>
+          <button className="rmg-audio-btn rmg-audio-btn-lg" onClick={()=>playing?audio.pause():audio.play()}
             style={{width:68,height:68,borderRadius:"50%",border:"none",cursor:"pointer",
               background:`linear-gradient(135deg,${accent},${accent2})`,
-              color:"#fff",fontSize:28,
+              color:"#fff",
               display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:`0 6px 24px ${accent}55`}}>
-            {playing?"⏸":"▶"}
+              boxShadow:`0 6px 24px ${accent}55`,
+              "--rmg-accent-a":`${accent}55`,"--rmg-accent-b":`${accent}55`,
+              animation:playing?"rmgPlayPulse 1.8s ease-out infinite":"none"}}>
+            {playing?<IcAudioPause size={30}/>:<IcAudioPlay size={30}/>}
           </button>
-          <button onClick={()=>audio.next()}
+          <button className="rmg-audio-btn" onClick={()=>audio.next()}
             style={{width:52,height:52,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:surface2,color:text,fontSize:22,
-              display:"flex",alignItems:"center",justifyContent:"center"}}>⏭</button>
-          <button onClick={nextRepeat}
+              background:surface2,color:text,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioNext size={24}/></button>
+          <button className={"rmg-audio-btn rmg-audio-toggle"+(repeatActive?" on":"")} onClick={nextRepeat}
             style={{width:44,height:44,borderRadius:"50%",border:"none",cursor:"pointer",
               background:repeatActive?accent+"22":"none",
-              color:repeatActive?accent:text2,fontSize:20,
+              color:repeatActive?accent:text2,
               display:"flex",alignItems:"center",justifyContent:"center",
               position:"relative"}}>
-            {repeatIcon}
+            <IcAudioRepeat size={20}/>
             {repeat==="one"&&<span style={{position:"absolute",bottom:2,fontSize:8,color:accent,fontWeight:800}}>1</span>}
           </button>
         </div>
@@ -7133,7 +7138,7 @@ function AudioPlayerScreen(){
           <div style={{color:text2,fontSize:11,fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>Скорость</div>
           <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4}}>
             {[0.5,0.75,1,1.25,1.5,1.75,2].map(s=>(
-              <button key={s} onClick={()=>audio.setSpeed(s)}
+              <button key={s} className="rmg-audio-btn" onClick={()=>audio.setSpeed(s)}
                 style={{flexShrink:0,padding:"6px 12px",borderRadius:20,border:`1.5px solid ${speed===s?accent:border}`,
                   cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,
                   background:speed===s?accent+"22":"none",
@@ -7146,17 +7151,19 @@ function AudioPlayerScreen(){
 
         {/* Queue */}
         <div style={{padding:"0 24px"}}>
-          <button onClick={()=>setShowQueue(q=>!q)}
+          <button className="rmg-audio-btn" onClick={toggleQueue}
             style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",
               padding:"12px 0",background:"none",border:"none",cursor:"pointer",
               borderTop:`1px solid ${border}`,fontFamily:"inherit"}}>
-            <div style={{color:text,fontWeight:700,fontSize:14}}>
-              📋 Очередь ({queue.length} {queue.length===1?"трек":queue.length<5?"трека":"треков"})
+            <div style={{color:text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:8}}>
+              <IcClipboard size={16} color={text}/> Очередь ({queue.length} {queue.length===1?"трек":queue.length<5?"трека":"треков"})
             </div>
-            <div style={{color:text2,fontSize:14,transform:showQueue?"rotate(180deg)":"none",transition:"transform 0.25s"}}>▼</div>
+            <div style={{color:text2,display:"flex",alignItems:"center",transform:showQueue&&!queueClosing?"rotate(180deg)":"none",transition:"transform 0.3s cubic-bezier(.34,1.56,.64,1)"}}><IcChevronDown size={16}/></div>
           </button>
-          {showQueue&&(
-            <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
+          {(showQueue||queueClosing)&&(
+            <div style={{animation:queueClosing?"rmgQueueClose 0.26s cubic-bezier(.4,0,1,1) both":"rmgQueueOpen 0.32s cubic-bezier(.22,1,.36,1) both"}}>
+              <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
+            </div>
           )}
         </div>
       </div>
@@ -7167,7 +7174,9 @@ function AudioPlayerScreen(){
 // ─── Chat Screen ──────────────────────────────────────────────────────────────
 function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile,showToast,wallpaperId,msgFontSize=14,chats=[]}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
+  const audio=useContext(AudioCtx);
   const[msgs,setMsgs]=useState([]);
+  const audioMsgs=useMemo(()=>msgs.filter(m=>m.type==="audio"&&!m.deletedForAll&&!m.deletedFor?.[currentUser.uid]),[msgs,currentUser.uid]);
   const[msgsReady,setMsgsReady]=useState(false); // true после первой загрузки — убирает "Напишите первым!" во время загрузки
   const[loadingOlder,setLoadingOlder]=useState(false);
   const[hasOlder,setHasOlder]=useState(true);
@@ -7182,6 +7191,20 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[showAddMembers,setShowAddMembers]=useState(false);
   const[showEmoji,setShowEmoji]=useState(false);
   const[showAttach,setShowAttach]=useState(false);
+  const[attachMounted,setAttachMounted]=useState(false);
+  const[attachClosing,setAttachClosing]=useState(false);
+  useEffect(()=>{
+    let t;
+    if(showAttach){
+      setAttachMounted(true);
+      setAttachClosing(false);
+    } else if(attachMounted){
+      setAttachClosing(true);
+      t=setTimeout(()=>{setAttachMounted(false);setAttachClosing(false);},200);
+    }
+    return ()=>{if(t)clearTimeout(t);};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[showAttach]);
   // Запоминаем, была ли открыта клавиатура в момент открытия панели эмодзи.
   // Используется, чтобы при закрытии эмодзи вернуть клавиатуру (как в WhatsApp/Telegram).
   const[kbWasOpen,setKbWasOpen]=useState(false);
@@ -7204,7 +7227,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[partnerPhoto,setPartnerPhoto]=useState(null);
   const[showSearch,setShowSearch]=useState(false);
   const[forwardMsg,setForwardMsg]=useState(null);
-  const bottomRef=useRef(),timerRef=useRef(),mediaRef=useRef(),voiceStreamRef=useRef(null),chunksRef=useRef([]),inputRef=useRef(),lastCntRef=useRef(0),fileRef=useRef(),lpVoiceRef=useRef(null),galleryRef=useRef(null),localSendingRef=useRef({}),quickRecordStartedRef=useRef(false);
+  const bottomRef=useRef(),timerRef=useRef(),mediaRef=useRef(),voiceStreamRef=useRef(null),chunksRef=useRef([]),inputRef=useRef(),lastCntRef=useRef(0),fileRef=useRef(),lpVoiceRef=useRef(null),galleryRef=useRef(null),localSendingRef=useRef({}),quickRecordStartedRef=useRef(false),confirmedTempIdsRef=useRef(new Set());
 
   // ── Свайп назад (как в TG) ──────────────────────────────────────────────────
   const[online,setOnline]=useState(navigator.onLine);
@@ -7359,7 +7382,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     }).catch(()=>{});
     // Баг #7 — убираем уведомления когда чат открыт
     try{
-      if(window.Capacitor?.isNativePlatform()) PushNotifications.removeAllDeliveredNotifications().catch(()=>{});
+      if(window.Capacitor?.isNativePlatform()) NativePush.removeAllDeliveredNotifications().catch(()=>{});
     }catch(e){}
   },[chat.id,currentUser.uid]);
 
@@ -7434,6 +7457,20 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
   const msgsRef=useRef(null);
   const prevMsgCount=useRef(0);
+  // Компенсация «прыжка» переписки при появлении/исчезновении мини-плеера
+  // над списком сообщений. Мини-плеер — сосед скролл-контейнера в flex-
+  // колонке, и когда он появляется, контейнер сообщений СЖИМАЕТСЯ по
+  // высоте, а scrollTop остаётся прежним в пикселях — из-за этого, если
+  // пользователь был внизу переписки, вид визуально «съезжает» и требует
+  // долистать руками. Подгоняем scrollTop сразу же, синхронно с изменением
+  // раскладки (useLayoutEffect — до отрисовки кадра, без видимого прыжка).
+  useLayoutEffect(()=>{
+    const el=msgsRef.current;
+    if(!el)return;
+    if(isNearBottomRef.current){
+      el.scrollTop=el.scrollHeight;
+    }
+  },[audio?.miniPhase]);
   // Якорь: захватываем до prepend, восстанавливаем до отрисовки
   const scrollAnchorRef=useRef(null);
   // Первый onSnapshot должен всегда прокрутить вниз
@@ -7543,13 +7580,19 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     let unsub;
     try{
       unsub=onSnapshot(q,snap=>{
-        if(snap.docs.length>0)oldestDocRef.current=snap.docs[0];
-        if(snap.docs.length<20)setHasOlder(false);
         const list=snap.docs.map(d=>({id:d.id,...d.data()}));
 
         const isFirstLoad=firestoreFirstLoad.current;
         if(isFirstLoad){
-          // Первый ответ от Firestore — блокируем кэш и требуем прокрутку вниз
+          // Первый ответ от Firestore — блокируем кэш и требуем прокрутку вниз.
+          // oldestDocRef/hasOlder тоже выставляем ТОЛЬКО здесь: это единственный
+          // момент, когда окно «последние 20» совпадает с полным списком,
+          // который у нас загружен. На последующих срабатываниях этого же
+          // слушателя (например, из-за readBy на одном из последних 20
+          // сообщений) трогать их нельзя — иначе пагинация «откатывается»
+          // назад к границе последних 20 при каждом чужом прочтении.
+          if(snap.docs.length>0)oldestDocRef.current=snap.docs[0];
+          if(snap.docs.length<20)setHasOlder(false);
           firestoreFirstLoad.current=false;
           firestoreLoadedRef.current=true;
           shouldScrollBottomRef.current=true;
@@ -7577,7 +7620,36 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
         lastCntRef.current=list.length;
         const locals=Object.values(localSendingRef.current||{});
-        setMsgs(locals.length?[...list,...locals]:list);
+        if(isFirstLoad){
+          // Первая загрузка — заменяем целиком (кэш уже отработал своё выше).
+          setMsgs(locals.length?[...list,...locals]:list);
+        }else{
+          // Последующие срабатывания слушателя «последних 20» — СЛИВАЕМ с уже
+          // загруженной историей, а не затираем её. Иначе любое сообщение
+          // старше этого окна (загруженное через loadOlderMsgs при скролле
+          // вверх) пропадает при первом же изменении в последних 20
+          // документах (новое сообщение, readBy, реакция и т.п.) —
+          // из-за этого переписка «то грузится, то нет».
+          const freshIds=new Set(list.map(m=>m.id));
+          setMsgs(prev=>{
+            const older=prev.filter(m=>
+              !freshIds.has(m.id)&&
+              !locals.some(l=>l.id===m.id)&&
+              // Гонка: оптимистичное сообщение (tmp_...) ещё не успело
+              // переименоваться в реальный id (см. sendMsg), а слушатель уже
+              // принёс это же сообщение в list — без этой проверки на экране
+              // на секунду появляются два одинаковых сообщения.
+              !(String(m.id||"").startsWith("tmp_")&&confirmedTempIdsRef.current.has(m.id))
+            );
+            const merged=[...older,...list,...locals];
+            merged.sort((a,b)=>{
+              const ta=a.createdAt?.seconds?a.createdAt.seconds*1000:(a.unixMs||0);
+              const tb=b.createdAt?.seconds?b.createdAt.seconds*1000:(b.unixMs||0);
+              return ta-tb;
+            });
+            return merged;
+          });
+        }
         list.forEach(m=>saveMsg({...m,chatId:chat.id}));
         // Оффлайн-архив: режим "Всегда" — сохраняем каждое полученное сообщение
         try{
@@ -7677,10 +7749,27 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     setMsgs(prev=>[...prev,optimistic]);
     saveMsg({...optimistic,chatId:chat.id});
 
+    // Если чат был скрыт у меня («удалён»), снимаем скрытие ТОЛЬКО сейчас —
+    // при реальной отправке сообщения, а не просто при открытии чата/профиля.
+    try{
+      const hk="rmg_hidden_chats_"+currentUser.uid;
+      const hm=readHidden(hk);
+      if(hm[chat.id]){delete hm[chat.id];localStorage.setItem(hk,JSON.stringify(hm));}
+    }catch(e){}
+
     try{
       const ref = await addDoc(collection(db,"chats",chat.id,"messages"),payload);
-      // Заменяем временное на реальное (onSnapshot тоже придёт, но ключ совпадёт)
-      setMsgs(prev=>prev.map(m=>m.id===tempId?{...m,id:ref.id,_pending:false}:m));
+      // Заменяем временное на реальное (onSnapshot тоже придёт, но ключ совпадёт).
+      // Если живой слушатель уже успел принести этот же документ (гонка с
+      // WebSocket — часто на нестабильной связи), НЕ переименовываем tempId в
+      // ref.id (это дало бы два сообщения с одинаковым id на экране), а просто
+      // убираем временную заглушку — настоящая копия уже в списке.
+      confirmedTempIdsRef.current.add(tempId);
+      setMsgs(prev=>{
+        const hasReal=prev.some(m=>m.id===ref.id);
+        if(hasReal)return prev.filter(m=>m.id!==tempId);
+        return prev.map(m=>m.id===tempId?{...m,id:ref.id,_pending:false}:m);
+      });
       const preview=extra.type==="text"?extra.text:extra.type==="voice"?"🎙 Голосовое":extra.type==="circle"?"⭕ Кружок":extra.type==="sticker"?extra.text:extra.type==="image"?"🖼 Фото":extra.type==="video"?"🎬 Видео":extra.type==="audio"?"🎵 "+(extra.fileName||"Аудио"):extra.type==="file"?(extra.fileType?.startsWith("image/")?"🖼 Фото":"📎 "+extra.fileName):"";
       const allMembers=chatData?.names?Object.keys(chatData.names):chatData?.members||chat?.members||[];
       // Атомарно увеличиваем unreadBy для каждого участника кроме отправителя.
@@ -7692,6 +7781,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       });
       updateDoc(doc(db,"chats",chat.id),{
         lastMsg:preview,lastTime:timeNow(),lastTimeMs:Date.now(),lastSender:profile?.name||"",
+        // Если чат был скрыт у меня («удалён»), снимаем скрытие ИМЕННО здесь —
+        // при реальной отправке сообщения, а не просто при открытии чата/
+        // профиля. Пишем в сам документ чата (не только localStorage), чтобы
+        // отметка синхронизировалась между устройствами и не терялась при
+        // переустановке приложения. (deleteField недоступен в локальной
+        // обёртке firestore — просто перезаписываем в null, isHiddenChat
+        // трактует falsy-значение как «не скрыт».)
+        ["hiddenFor."+currentUser.uid]:null,
         ...unreadUpdate,
         ...(allMembers.length>0?{members:allMembers}:{})
       }).catch(()=>{});
@@ -8167,7 +8264,6 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",display:"flex",flexDirection:"column",zIndex:100,
         animation:"pageSlideIn 0.28s cubic-bezier(0.25,0.46,0.45,0.94)"
       }} onClick={closeOverlaysOutside}>        {/* Pinned Message */}
-        {!online&&<OfflineBar/>}
         {pinnedMsg&&<PinnedBar msg={pinnedMsg} canPin={canManage} onUnpin={()=>updateDoc(doc(db,"chats",chat.id),{pinnedMsg:null}).catch(()=>{})}/>}
         {/* Header */}
         <div style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:13,paddingRight:13,paddingBottom:9,background:surface||"#1C1C1E",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:11,flexShrink:0,boxShadow:"0 1px 6px rgba(0,0,0,0.18)"}} onClick={e=>e.stopPropagation()}>
@@ -8274,7 +8370,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           ):null}
           {msgs.map((m,i)=>{
             if(m.deletedFor?.[currentUser.uid]||m.deletedForAll)return null;
-            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={setLightbox} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize}/>;
+            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id}/>;
           })}
           <div ref={bottomRef}/>
         </div>
@@ -8326,8 +8422,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         )}
 
         {/* Attach panel */}
-        {showAttach&&!showEmoji&&(
-          <div style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",animation:"slideUp 0.2s ease"}} onClick={e=>e.stopPropagation()}>
+        {attachMounted&&!showEmoji&&(
+          <div style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",animation:attachClosing?"slideDown 0.2s ease forwards":"slideUp 0.2s ease"}} onClick={e=>e.stopPropagation()}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9}}>
               {[{ico:<IcImage size={24} color={accent} style={_mi}/>,lbl:"Галерея",fn:()=>{if(galleryRef.current){galleryRef.current.click();}}},{ico:<IcFileDoc size={24} color="#f4a231" style={_mi}/>,lbl:"Файл",fn:()=>fileRef.current?.click()},{ico:<IcMusic size={24} color="#9c27b0" style={_mi}/>,lbl:"Музыка",fn:()=>fileRef.current?.click()},{ico:<IcCircleVid size={24} color="#43a047" style={_mi}/>,lbl:"Кружок",fn:startCircle}].map(b=>(
                 <button key={b.lbl} onClick={e=>{e.stopPropagation();b.fn();setShowAttach(false);}} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,padding:"11px 6px",background:surface2,border:`1px solid ${border}`,borderRadius:14,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}} onMouseEnter={e=>e.currentTarget.style.background=accent+"22"} onMouseLeave={e=>e.currentTarget.style.background=surface2}>
@@ -8342,11 +8438,6 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {/* Input */}
         {canWrite?(
           <div style={{padding:"7px 9px",paddingBottom:showEmoji?7:"max(7px,env(safe-area-inset-bottom,7px))",background:surface+"E8",borderTop:`1px solid ${border}`,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",flexShrink:0}} onClick={e=>e.stopPropagation()}>
-            {!online&&(
-              <div style={{textAlign:"center",color:"#ff9800",fontSize:13,padding:"10px 0",fontWeight:600}}>
-                🔒 Отправка недоступна (оффлайн режим)
-              </div>
-            )}
             {online&&editMsg&&(
               <div style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:surface2,borderLeft:`3px solid ${accent}`,marginBottom:4}}>
                 <div style={{flex:1,minWidth:0}}>
@@ -8366,13 +8457,13 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                 <button onMouseDown={e=>e.preventDefault()} onClick={()=>{if(mediaRef.current?.state==="recording"){mediaRef.current.ondataavailable=null;mediaRef.current.onstop=null;mediaRef.current.stop();}try{voiceStreamRef.current?.getTracks().forEach(t=>t.stop());}catch(e2){}voiceStreamRef.current=null;setRecording(false);setRecSec(0);clearInterval(timerRef.current);}} style={{background:"rgba(255,255,255,0.07)",border:"none",borderRadius:18,padding:"6px 10px",color:text2,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
               </div>
             )}
-            {online&&(
+            {(
               <div style={recording?{position:"absolute",left:-10000,top:0,width:10,height:44,opacity:0,overflow:"hidden",pointerEvents:"none"}:{display:"flex",alignItems:"center",gap:7}}>
                 <button onClick={e=>{e.stopPropagation();
                   // Если открываем attach — закрываем эмодзи с учётом kbWasOpen
                   if(showEmoji)closeEmojiPanel();
                   setShowAttach(a=>!a);
-                }} style={{width:42,height:42,borderRadius:"50%",background:showAttach?accent+"33":surface2,border:`1.5px solid ${showAttach?accent:border}`,cursor:"pointer",fontSize:19,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>📎</button>
+                }} style={{width:42,height:42,borderRadius:"50%",background:showAttach?accent+"33":surface2,border:`1.5px solid ${showAttach?accent:border}`,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s",color:showAttach?accent:text2}}><IcPaperclip size={19}/></button>
                 <button onClick={e=>{e.stopPropagation();
                   if(showEmoji)closeEmojiPanel();
                   else openEmojiPanel();
@@ -8437,10 +8528,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                         style={{width:42,height:42,borderRadius:"50%",
                           background:voiceHolding?accent+"44":surface2,
                           border:`1.5px solid ${voiceHolding?accent:border}`,
-                          cursor:"pointer",fontSize:18,display:"flex",alignItems:"center",
-                          justifyContent:"center",flexShrink:0,
+                          cursor:"pointer",display:"flex",alignItems:"center",
+                          justifyContent:"center",flexShrink:0,color:text2,
                           transition:"all 0.15s",WebkitTapHighlightColor:"transparent",
-                          transform:voiceHolding?"scale(1.12)":"scale(1)"}}>{quickMode==="voice"?"🎙":"⭕"}</button>
+                          transform:voiceHolding?"scale(1.12)":"scale(1)"}}>{quickMode==="voice"?<IcMic size={18}/>:<IcCircleOutline size={18}/>}</button>
                     </div>
                   </div>
                 )}
@@ -8598,10 +8689,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 // ─── Chat List ────────────────────────────────────────────────────────────────
 function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile,onChatsLoad,
   themeName,onChangeTheme,wallpaperId,onChangeWallpaper,accentId,onChangeAccent,
-  msgFontSize=14,onChangeFontSize,onLogout,online=true}){
+  msgFontSize=14,onChangeFontSize,onLogout,online=true,wsState="open"}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const CACHE_KEY="rmg_chats_"+currentUser.uid;
-  const cachedChats=()=>{try{const c=JSON.parse(localStorage.getItem(CACHE_KEY)||"[]");const h=readHidden("rmg_hidden_chats_"+currentUser.uid);return c.filter(x=>!isHiddenChat(h,x));}catch{return[];}};
+  const cachedChats=()=>{try{const c=JSON.parse(localStorage.getItem(CACHE_KEY)||"[]");const h=readHidden("rmg_hidden_chats_"+currentUser.uid);return c.filter(x=>!isHiddenChat(h,currentUser.uid,x));}catch{return[];}};
   const[chats,setChats]=useState(cachedChats);
   // true после первого ответа Firestore или если кэш уже есть — убирает flash "Нет чатов"
   const[chatsReady,setChatsReady]=useState(()=>cachedChats().length>0);
@@ -8764,7 +8855,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
       // Скрытые чаты прячем только пока нет сообщений новее момента удаления
       if(_seq!==chatsSeqRef.current)return;
       const _hidden=readHidden("rmg_hidden_chats_"+(currentUser.uid));
-      const filtered=list.filter(c=>!isHiddenChat(_hidden,c));
+      const filtered=list.filter(c=>!isHiddenChat(_hidden,currentUser.uid,c));
       setChats(filtered);onChatsLoad?.(filtered);
       setChatsReady(true);
       // Кэш для оффлайн-запуска. Сохраняем ВСЕ чаты (метаданные мизерные),
@@ -8863,7 +8954,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
       if(list.length>0){
         // Применяем фильтр скрытых чатов так же, как onSnapshot.
         const _hidden=readHidden("rmg_hidden_chats_"+(currentUser.uid));
-        const filtered=list.filter(c=>!isHiddenChat(_hidden,c));
+        const filtered=list.filter(c=>!isHiddenChat(_hidden,currentUser.uid,c));
         // Заменяем state ТОЛЬКО если он пуст — чтобы не затереть свежие данные
         // Firestore, которые уже могли прийти параллельно.
         setChats(prev=>prev.length===0?filtered:prev);
@@ -8920,9 +9011,15 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
       setChats(prev=>prev.filter(ch=>ch.id!==c.id));
       // ВАЖНО: себя из members НЕ удаляем — иначе новые сообщения собеседника не вернут чат.
       // Если members был сломан раньше — чиним его.
+      const patch={["hiddenFor."+currentUser.uid]:Date.now()};
       if(c.type==="direct"&&c.names&&(c.members||[]).length<Object.keys(c.names).length){
-        updateDoc(doc(db,"chats",c.id),{members:Object.keys(c.names)}).catch(()=>{});
+        patch.members=Object.keys(c.names);
       }
+      // Пишем отметку скрытия СЕРВЕРНО (в сам документ чата), а не только в
+      // localStorage — иначе при переустановке приложения (или входе с
+      // другого устройства) localStorage стирается, и «удалённые» чаты
+      // возвращаются, потому что на сервере их никто не помечал скрытыми.
+      updateDoc(doc(db,"chats",c.id),patch).catch(()=>{});
     }catch(e){console.error("deleteChat:",e);}
     setCtxChat(null);
   };
@@ -8958,8 +9055,6 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
 
   return(
     <div style={{display:"flex",flexDirection:"column",height:"100vh",width:"100%",background:bg||"#0A0A0A",position:"relative"}}>
-      {/* Жёлтый мини-бар оффлайн-режима — самый верхний элемент */}
-      {!online&&<OfflineBar/>}
       {/* ── Top Header ── */}
       <div style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:14,paddingRight:14,paddingBottom:9,background:surface+"EE",borderBottom:`1px solid ${border}`,backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",flexShrink:0}}>
         <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:9,minHeight:36}}>
@@ -8971,7 +9066,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
           </button>
           {/* Center: tab title — absolutely positioned, doesn't intercept clicks */}
           <div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",color:text,fontWeight:800,fontSize:20,display:"flex",alignItems:"center",gap:8,pointerEvents:"none",whiteSpace:"nowrap"}}>
-            {tab==="all"&&<span>Чаты</span>}
+            {tab==="all"&&(
+              <span>{!online?"ожидание сети":wsState!=="open"?"Обновление...":(profile?.name||"Чаты")}</span>
+            )}
             {tab==="direct"&&<span>Личные</span>}
             {tab==="contacts"&&<span>Контакты</span>}
             {tab==="groups"&&<span>Группы</span>}
@@ -8980,10 +9077,10 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
           {/* Right: action buttons */}
           <div style={{display:"flex",gap:7}}>
             <button onClick={onFind} className="rmg-press" style={{width:36,height:36,borderRadius:"50%",background:surface2,border:`1px solid ${border}`,color:accent,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><IcSearchSm size={18}/></button>
-            <button onClick={()=>{haptic(8);setFab(f=>!f);}} style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",color:"#fff",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.25s",transform:fab?"rotate(45deg)":"none"}}><IcPencilSm size={17}/></button>
+            <button onClick={()=>{haptic(8);setFab(f=>!f);}} style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",color:contrastOn(accent),fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.25s",transform:fab?"rotate(45deg)":"none"}}><IcPencilSm size={17}/></button>
           </div>
         </div>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Поиск" style={{width:"100%",background:surface2,border:"none",borderRadius:13,padding:"9px 13px",color:text,fontSize:13,transition:"all 0.3s ease",outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Поиск" style={{width:"100%",background:surface2,border:"none",borderRadius:14,padding:"11px 15px",color:text,fontSize:14,transition:"all 0.3s ease",outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
       </div>
       {/* Mini Player — appears below search bar */}
       <AudioMiniBar/>
@@ -8995,8 +9092,6 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
           если открыта группа — возвращают на главную; иначе — закрывают весь overlay. */}
       {showSettingsTab&&(
         <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:bg,overflowY:"auto",paddingBottom:72,animation:"pageSlideIn 0.25s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
-          {/* Жёлтый мини-бар оффлайн-режима — виден и на экране настроек */}
-          {!online&&<OfflineBar/>}
           {/* Заголовок настроек — динамический по settingsGroup */}
           <div style={{position:"sticky",top:0,zIndex:5,paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:15,paddingRight:15,paddingBottom:13,background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:13,flexShrink:0,backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>
             <button onClick={()=>{
@@ -9134,38 +9229,34 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
                       onTouchEnd={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background="transparent";}}
                       onTouchMove={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background="transparent";}}
                       style={{
-                        display:"flex",alignItems:"center",gap:12,padding:"11px 14px",
+                        display:"flex",alignItems:"center",gap:14,padding:"13px 16px",
                         cursor:"pointer",transition:"background 0.13s",
-                        borderBottom:`1px solid ${border}`,
-                        background:isNew?accent+"0D":"transparent",
-                        borderLeft:isNew?`3px solid ${accent}`:"3px solid transparent",
                         animation:`listIn 0.2s ease ${Math.min(i*0.04,0.3)}s both`,
                       }}>
-                      <div style={{position:"relative"}}>
-                        <Avatar name={name} size={52} photo={
+                      <div style={{position:"relative",flexShrink:0}}>
+                        <Avatar name={name} size={54} photo={
                           c.type==="direct"
                             ?(()=>{const p=Object.keys(c.names||c.photos||{}).find(k=>k!==currentUser.uid);return bestPhoto(p&&photosCache[p],p&&(c.photos||{})[p],c._partnerPhoto);})()
                             :(c.photo||c._partnerPhoto||null)
                         }/>
                         {isNew&&(
                           <div style={{
-                            position:"absolute",top:-3,right:-3,minWidth:20,height:20,
-                            borderRadius:10,background:accent,zIndex:10,
+                            position:"absolute",bottom:-2,right:-2,minWidth:19,height:19,
+                            borderRadius:10,background:accent,
                             display:"flex",alignItems:"center",justifyContent:"center",
-                            fontSize:10,fontWeight:800,color:"#fff",padding:"0 5px",
-                            border:`2px solid ${bg}`,boxShadow:`0 0 10px ${accent}99`,
-                            animation:"pulse 1.5s ease-in-out infinite"
+                            fontSize:10,fontWeight:700,color:contrastOn(accent),padding:"0 5px",
+                            border:`2.5px solid ${bg}`,
                           }}>{myUnread>99?"99+":myUnread}</div>
                         )}
                       </div>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:3}}>
-                          <div style={{color:text,fontWeight:isNew?800:600,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>
+                      <div style={{flex:1,minWidth:0,paddingBottom:14,borderBottom:`1px solid ${border}66`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+                          <div style={{color:text,fontWeight:isNew?700:500,fontSize:15,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,letterSpacing:-0.1}}>
                             {c.type==="channel"?"📢 ":c.type==="group"?"🫂 ":""}{name}
                           </div>
-                          {c.lastTime&&<div style={{color:isNew?accent:text2+"88",fontSize:10,flexShrink:0,marginLeft:7,fontWeight:isNew?700:400}}>{c.lastTime}</div>}
+                          {c.lastTime&&<div style={{color:text2,fontSize:11,flexShrink:0,marginLeft:8}}>{c.lastTime}</div>}
                         </div>
-                        <div style={{color:isNew?text:text2,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isNew?600:400}}>
+                        <div style={{color:isNew?text2:text2+"cc",fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:400}}>
                           {c.lastMsg||"Нет сообщений"}
                         </div>
                       </div>
@@ -9269,8 +9360,10 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
 
 // ─── App Root ─────────────────────────────────────────────────────────────────
 
-// ─── UnifiedPush setup ───────────────────────────────────────────────────────
-// VAPID public key is loaded from our server. The private half never leaves it.
+// ─── Push setup (встроенный ntfy, без сторонних приложений) ──────────────────
+// Топик генерируется на устройстве и сохраняется на сервере. Дальше нативный
+// сервис сам держит постоянное соединение с ntfy и показывает уведомления —
+// никакого UnifiedPush-дистрибьютора и никакого Google не требуется.
 
 function openChatFromPush(chatId) {
   if (!chatId) return;
@@ -9280,64 +9373,51 @@ function openChatFromPush(chatId) {
 
 async function setupPush(uid) {
   if (!uid) return;
+  if (pushRegistrationUid === uid && nativePushListenersReady) return;
   pushRegistrationUid = uid;
 
   try {
     if (!Capacitor.isNativePlatform()) return;
-    const config = await api("/push/vapid");
-    if (!config?.publicKey) throw new Error("Сервер не вернул VAPID-ключ");
-    await PushNotifications.configure({ vapidKey: config.publicKey });
 
-    // Слушатели ставим до register(): дистрибьютор может вернуть сохранённый
-    // endpoint сразу после регистрации.
     if (!nativePushListenersReady) {
-      await PushNotifications.addListener("registration", async registration => {
-        if (!registration?.endpoint || !pushRegistrationUid) return;
-        try {
-          await serverSaveUnifiedPush(pushRegistrationUid, registration);
-          console.log("✅ UnifiedPush-устройство сохранено");
-        } catch (e) {
-          console.warn("⚠️ Не удалось сохранить UnifiedPush:", e?.message || e);
-        }
+      await NativePush.addListener("registrationError", err => {
+        console.warn("⚠️ Push: ошибка запуска:", err?.error || err);
       });
 
-      await PushNotifications.addListener("registrationError", err => {
-        console.warn("⚠️ Ошибка регистрации UnifiedPush:", err?.error || err);
-      });
-
-      await PushNotifications.addListener("pushNotificationReceived", notification => {
+      await NativePush.addListener("pushNotificationReceived", notification => {
         const incomingChatId = String(notification?.data?.chatId || "");
         if (incomingChatId && incomingChatId === _activeChatId && notification?.id != null) {
-          PushNotifications.removeDeliveredNotifications({
+          NativePush.removeDeliveredNotifications({
             notifications: [{ id: Number(notification.id) }],
           }).catch(() => {});
         }
       });
 
-      await PushNotifications.addListener("pushNotificationActionPerformed", action => {
+      await NativePush.addListener("pushNotificationActionPerformed", action => {
         openChatFromPush(action?.notification?.data?.chatId);
       });
       nativePushListenersReady = true;
     }
 
-    let permission = await PushNotifications.checkPermissions();
+    let permission = await NativePush.checkPermissions();
     if (permission.receive === "prompt" || permission.receive === "prompt-with-rationale") {
-      permission = await PushNotifications.requestPermissions();
+      permission = await NativePush.requestPermissions();
     }
     if (permission.receive !== "granted") {
       console.warn("⚠️ Уведомления не разрешены в Android");
       return;
     }
 
-    await PushNotifications.createChannel({ id: "messages" }).catch(() => {});
-    const saved = await PushNotifications.getRegistration().catch(() => null);
-    if (saved?.endpoint) await serverSaveUnifiedPush(uid, saved);
-    await PushNotifications.register();
+    await NativePush.createChannel({ id: "messages" }).catch(() => {});
 
-    const launch = await PushNotifications.getLaunchData().catch(() => null);
+    const topic = getPushTopic();
+    await serverSaveTopic(uid, topic).catch(e => console.warn("⚠️ Не удалось сохранить топик:", e?.message || e));
+    await NativePush.start({ topic });
+
+    const launch = await NativePush.getLaunchData().catch(() => null);
     if (launch?.chatId) openChatFromPush(launch.chatId);
   } catch (e) {
-    console.log("UnifiedPush setup error:", e.message);
+    console.log("Push setup error:", e.message);
   }
 }
 
@@ -9355,22 +9435,49 @@ export default function App(){
   const[themeName,setThemeName]=useState(()=>{
     const saved=localStorage.getItem("rmg_theme");
     if(saved)return saved;
-    // Auto detect system theme
-    return window.matchMedia?.("(prefers-color-scheme: dark)").matches?"dark":"light";
+    // "crystal" даёт красивый эффект, но её прозрачный bg ломает все места
+    // в приложении, которые рассчитывают на сплошную заливку для перекрытия
+    // экрана (настройки, профиль и т.д.) — контент отовсюду просвечивал друг
+    // сквозь друга. Пока по умолчанию — надёжная сплошная тёмная тема.
+    return "dark";
   });
   const[wallpaperId,setWallpaperId]=useState(()=>localStorage.getItem("rmg_wallpaper")||"none");
-  const[accentId,setAccentId]=useState(()=>localStorage.getItem("rmg_accent")||"");
+  const[accentId,setAccentId]=useState(()=>localStorage.getItem("rmg_accent")||"white");
   const[msgFontSize,setMsgFontSize]=useState(()=>parseInt(localStorage.getItem("rmg_fontsize")||"14"));
   const[toast,setToast]=useState(null);
   const[online,setOnline]=useState(navigator.onLine);
+  const[wsState,setWsState]=useState("open"); // "open" | "connecting" | "closed" — для заголовка как в Telegram
   const[minSplashDone,setMinSplashDone]=useState(false);
   useEffect(()=>{
     const up=()=>setOnline(true);
-    const dn=()=>{setOnline(false);setToast({msg:"Нет интернета — режим оффлайн",type:"warn"});}
+    const dn=()=>setOnline(false);
     window.addEventListener("online",up);
     window.addEventListener("offline",dn);
     return()=>{window.removeEventListener("online",up);window.removeEventListener("offline",dn);};
   },[]);
+  useEffect(()=>{
+    const onWs=e=>setWsState(e.detail);
+    window.addEventListener("rmg:ws",onWs);
+    return()=>window.removeEventListener("rmg:ws",onWs);
+  },[]);
+
+  // При возврате приложения из фона активный DOM-фокус (например, поле ввода
+  // сообщения в чате, который был открыт до сворачивания) может остаться
+  // "залипшим", даже если сейчас видим список чатов — Android снова
+  // показывает клавиатуру для этого невидимого поля. Снимаем фокус, если
+  // видим именно список чатов.
+  useEffect(()=>{
+    const onVis=()=>{
+      if(document.visibilityState==="visible"&&screen==="list"){
+        const el=document.activeElement;
+        if(el&&(el.tagName==="INPUT"||el.tagName==="TEXTAREA")){
+          try{el.blur();}catch(e){}
+        }
+      }
+    };
+    document.addEventListener("visibilitychange",onVis);
+    return()=>document.removeEventListener("visibilitychange",onVis);
+  },[screen]);
 
   // Открытие нужного чата после тапа по Android/PWA-уведомлению.
   const openPushChat = useCallback(async chatId => {
@@ -9443,7 +9550,6 @@ export default function App(){
   const viewProfileRef=useRef(null);
   // Init SQLite on mount
   useEffect(()=>{
-    initSQLite();
     OfflineStore.init().catch(()=>{});
   },[]);
 
@@ -9571,19 +9677,6 @@ export default function App(){
       try{capHandle?.remove();}catch(e){}
     };
   },[]);
-  // ── Отправка push через Firestore (Cloud Function подхватит) ──────────────
-  const sendPushNotif=async(recipientUid,title,body,chatId,chatName,chatType)=>{
-    try{
-      const snap=await getDoc(doc(db,"users",recipientUid));
-      const token=snap.data()?.fcmToken;
-      if(!token)return;
-      await addDoc(collection(db,"notifications"),{
-        to:token,recipientUid,title,body,
-        data:{chatId,chatName,chatType},
-        createdAt:serverTimestamp()
-      });
-    }catch(e){}
-  };
 
   useEffect(()=>onAuthStateChanged(auth,async user=>{
     if(user){
@@ -9652,7 +9745,7 @@ export default function App(){
       }).catch(()=>{});
     };
     hb();const id=setInterval(hb,30000);
-    // ✅ Настраиваем настоящий FCM после входа. Старый ntfy-топик не является
+    // ✅ Встроенный push (ntfy) после входа — без стороннего приложения-дистрибьютора.
     setupPush(fbUser.uid).catch(e=>console.warn("⚠️ Не удалось настроить push:",e?.message||e));
     return()=>clearInterval(id);
   },[fbUser]);
@@ -9685,7 +9778,8 @@ export default function App(){
             // 5) В шторке системы prefix скрываем по настройке notifPreview.
             const previewText=getS("notifPreview")===false?"Новое сообщение":d.lastMsg;
             playSound("msg"); // playSound сам проверяет notifSound
-            setToast({icon:"💬",title:cname||"Новое сообщение",body:previewText,onClick:()=>{setActiveChat({id:chatId,...d,name:cname});setScreen("chat");setToast(null);}});
+            // Внутренний баннер "Новое сообщение" убран по просьбе — обычных
+            // push-уведомлений достаточно, звук внутри приложения оставлен.
           }
         }
       });
@@ -9717,6 +9811,16 @@ export default function App(){
     .msgs-list{will-change:scroll-position;contain:paint layout}
     #root{height:100%;width:100%}
     ::-webkit-scrollbar{width:2px}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
+    .rmg-audio-btn{transition:transform 0.16s cubic-bezier(.34,1.56,.64,1),opacity 0.16s,background 0.2s,color 0.2s}
+    .rmg-audio-btn:active{transform:scale(0.82);opacity:0.7}
+    .rmg-audio-btn-lg:active{transform:scale(0.9)}
+    .rmg-audio-toggle{transition:transform 0.25s cubic-bezier(.34,1.56,.64,1),background 0.2s,color 0.2s}
+    .rmg-audio-toggle.on{animation:rmgTogglePop 0.32s cubic-bezier(.34,1.56,.64,1)}
+    @keyframes rmgTogglePop{0%{transform:scale(1)}45%{transform:scale(1.22)}100%{transform:scale(1)}}
+    @keyframes rmgQueueOpen{from{opacity:0;transform:translateY(-8px) scaleY(0.94);transform-origin:top}to{opacity:1;transform:none}}
+    @keyframes rmgQueueClose{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-8px) scaleY(0.94);transform-origin:top}}
+    @keyframes rmgPlayPulse{0%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 var(--rmg-accent-b)}70%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 14px transparent}100%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 transparent}}
+    @keyframes rmgRowIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
     @keyframes msgIn{0%{opacity:0;transform:translateY(16px) scale(0.92)}50%{opacity:1;transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:none}}
     @keyframes bubbleIn{from{opacity:0;transform:scale(0.88) translateY(6px)}to{opacity:1;transform:none}}
     @keyframes splashRing{from{transform:scale(0.88);opacity:0.7}to{transform:scale(1.3);opacity:0}}
@@ -9725,6 +9829,7 @@ export default function App(){
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
     @keyframes fadeIn{from{opacity:0}to{opacity:1}}
     @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+    @keyframes slideDown{from{opacity:1;transform:none}to{opacity:0;transform:translateY(20px)}}
     @keyframes emojiPanelIn{0%{opacity:0;transform:translateY(100%)}60%{opacity:1}100%{opacity:1;transform:translateY(0)}}
     @keyframes emojiPanelOut{0%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(100%)}}
     @keyframes emojiPop{0%{transform:scale(0.6);opacity:0}60%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
@@ -9921,7 +10026,7 @@ export default function App(){
               zIndex:screen==="list"?1:0,
             }}>
               <ChatList currentUser={fbUser} profile={profile}
-                online={online}
+                online={online} wsState={wsState}
                 onOpen={chat=>{setActiveChat(chat);setScreenAnim("toChat");setScreen("chat");}}
                 onFind={()=>setFinding(true)}
                 onEditProfile={()=>setEditing(true)}
