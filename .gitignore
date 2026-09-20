@@ -3,3 +3,5 @@ dist/
 android/
 __MACOSX/
 .DS_Store
+outputs/
+*.bak

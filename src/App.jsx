@@ -2044,6 +2044,61 @@ let _videoFullscreenClose = null;
 // просмотр изображения (с обратной анимацией), а не выходит из чата.
 let _lightboxClose = null;
 let _chatBackHandler = null;
+
+// ── Плавная клавиатура (IME): «док поверх списка» (финальная схема) ──────────
+// Корень чата НИКОГДА не меняет размеры (нет paddingBottom) → сообщения
+// нарисованы по весь экран всегда, чёрной пустой полосы за клавиатурой
+// не существует в принципе. Панель ввода (док) — абсолютная, ездит
+// композиторным transform'ом поверх списка. Распорка внизу списка
+// (высота = dockH + текущая высота клавиатуры) держит последнее
+// сообщение над панелью; клэмп scrollTop — без чтения scrollHeight.
+// В settle перестройки НЕТ вообще: все значения уже финальные.
+let _imeR={dock:null,list:null,spacer:null,near:null,onSettle:null};
+let _imePad=0,_imeNear=null,_imeDockH=0;
+window.__rmgImeMoving=false; // true, пока длится IME-анимация (см. onScroll)
+window.__rmgImeHasDock=()=>!!_imeR.dock; // нативный слой спрашивает, кому вести IME
+window.__rmgImeFrame=(h,sys)=>{
+  const pad=Math.max(0,(h||0)-(sys||0));
+  window.__rmgImeMoving=true;
+  if(!_imeR.dock)return;
+  // «У низа?» и высоту дока захватываем ОДИН раз за анимацию.
+  if(_imeNear===null){
+    _imeNear=!!(_imeR.near&&_imeR.near());
+    _imeDockH=_imeR.dock.offsetHeight||0;
+  }
+  _imePad=pad;
+  _imeR.dock.style.transform=pad?`translateY(${-pad}px)`:"";
+  if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+pad)+"px";
+  if(_imeNear){const el=_imeR.list;if(el)el.scrollTop=1000000000;}
+};
+window.__rmgImeSettle=(h,sys)=>{
+  const pad=Math.max(0,(h||0)-(sys||0));
+  window.__rmgImeMoving=false;
+  if(_imeR.dock){
+    _imeDockH=_imeR.dock.offsetHeight||0;
+    _imePad=pad;
+    _imeR.dock.style.transform=pad?`translateY(${-pad}px)`:"";
+    if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+pad)+"px";
+    if(_imeNear){const el=_imeR.list;if(el)el.scrollTop=1000000000;}
+  }
+  _imeNear=null;
+  if(_imeR.onSettle)_imeR.onSettle();
+};
+window.__rmgImeLayout=()=>{
+  if(!_imeR.dock)return;
+  _imeDockH=_imeR.dock.offsetHeight||0;
+  if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+_imePad)+"px";
+};
+window.rmgRegisterImeDock=(cfg)=>{
+  _imeR={dock:cfg?.dock||null,list:cfg?.list||null,spacer:cfg?.spacer||null,near:cfg?.near||null,onSettle:cfg?.onSettle||null};
+  _imePad=0;_imeNear=null;_imeDockH=0;window.__rmgImeMoving=false;
+  if(_imeR.dock)_imeR.dock.style.transform="";
+  if(_imeR.dock&&_imeR.spacer){
+    _imeDockH=_imeR.dock.offsetHeight||0;
+    _imeR.spacer.style.height=_imeDockH+"px";
+  }
+};
+
 let _storyBackHandler = null;
 let _profileBackHandler = null;
 let _audioBackHandler = null;
@@ -7721,6 +7776,29 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   },[]);
 
   const lpActiveRef=useRef(false);
+  // ── IME: чат регистрируется в механизме «док поверх списка»:
+  // панель ввода абсолютная и ездит transform'ом ПОВЕРХ всегда-fullного
+  // списка сообщений; распорка внизу списка держит последнее сообщение
+  // над панелью. Корень чата никогда не меняет размеры → чёрной полосе
+  // (пустому фону за клавиатурой) неоткуда взяться, и в settle нет
+  // перестройки вообще.
+  const imeDockRef=useRef(null), imeSpacerRef=useRef(null);
+  useEffect(()=>{
+    if(typeof window.rmgRegisterImeDock!=="function")return;
+    const anchor=()=>{
+      const el=msgsRef.current;
+      if(el&&isNearBottomRef.current)el.scrollTop=1000000000;
+    };
+    window.rmgRegisterImeDock({
+      dock:imeDockRef.current,
+      list:msgsRef.current,
+      spacer:imeSpacerRef.current,
+      near:()=>isNearBottomRef.current,
+      onSettle:anchor,
+    });
+    return()=>{window.rmgRegisterImeDock({});};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
   // Флаг: пользователь у низа чата (последние ~5 сообщений)
   const isNearBottomRef=useRef(true);
   // Счётчик новых сообщений пока пользователь не у низа
@@ -7733,14 +7811,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     let settleTimer;
     let settleFrame=null;
     const settleAtBottom=()=>{
-      // The native inset callback moves the composer and the flex layout at
-      // display cadence. Do not read dimensions or write scrollTop during that
-      // animation: either action can synchronously lay out a long message list
-      // and causes the tiny stutters visible on some Android WebViews.
-      //
-      // We only correct once after the viewport stops changing. Assigning a
-      // very large offset lets the browser clamp to the real bottom without a
-      // scrollHeight read, so this remains a cheap final correction.
+      // Клэмп к низу: большое значение scrollTop браузер сам ограничит
+      // по текущему низу, без чтения scrollHeight из JS.
       settleFrame=requestAnimationFrame(()=>{
         settleFrame=null;
         const el=msgsRef.current;
@@ -7748,16 +7820,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       });
     };
     const onResize=()=>{
+      // На Android движет нативный механизм (__rmgImeFrame/__rmgImeSettle) —
+      // этот браузерный путь пропускаем (в браузере/PWA работает как раньше).
+      if(window.Capacitor?.isNativePlatform?.())return;
       // НЕ пересчитываем isNearBottomRef здесь — onScroll уже выставил его
-      // корректно в момент когда пользователь реально прокручивал. После
-      // открытия клавиатуры layout viewport уменьшается, что искусственно
-      // увеличивало dist и ломало флаг (баг: новое сообщение приходило, но
-      // мессенджер думал что пользователь не у низа, и не пролистывал).
-      // Если пользователь был у низа — просто докручиваем до низа, чтобы
-      // последнее сообщение оставалось видимым над клавиатурой.
+      // корректно в момент когда пользователь реально прокручивал.
       if(isNearBottomRef.current){
-        // visualViewport can fire for every IME animation frame. Debounce the
-        // final correction instead of interrupting native 60 fps movement.
         clearTimeout(settleTimer);
         settleTimer=setTimeout(settleAtBottom,120);
       }
@@ -8701,6 +8769,13 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const isGroup=chatData.type==="group";
   const canWrite=!isChannel||chatData.creatorUid===currentUser.uid;
   const canManage=(isGroup||isChannel)&&(chatData.creatorUid===currentUser.uid||(chatData.admins||[]).includes(currentUser.uid));
+  // Перемеряем распорку дока, когда меняется высота панели (эмодзи/attach,
+  // ответ/редактирование/запись голосового) или право записи. Стоит ПОСЛЕ
+  // объявления canWrite — в deps он вычисляется на рендере (раньше стоял
+  // выше объявления и падал с "Cannot access before initialization").
+  useLayoutEffect(()=>{
+    if(typeof window.__rmgImeLayout==="function")window.__rmgImeLayout();
+  },[showEmoji,showAttach,replyTo,editMsg,recording,uploading,canWrite]);
   const openChatHeader=()=>{
     if(isGroup||isChannel){setShowChatInfo(true);return;}
     onViewProfile(partnerUid||Object.keys(chatData.names||{}).find(k=>k!==currentUser.uid)||chatData.uid);
@@ -8839,6 +8914,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {/* Messages */}
         <div ref={msgsRef}
           onScroll={e=>{
+            // Во время движения клавиатуры список крутится программно
+            // (IME-механизм якорит низ) — пропускаем всю тяжёлую обработку,
+            // она всё равно не нужна, пока пользователь не скроллит сам.
+            if(window.__rmgImeMoving)return;
             const el=e.target;
             const dist=el.scrollHeight-el.scrollTop-el.clientHeight;
             // Строгий порог "у самого низа" ≈ 80px (≈ высота 1 сообщения).
@@ -8877,6 +8956,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id}/>;
           })}
           <div ref={bottomRef}/>
+          <div ref={imeSpacerRef} style={{flexShrink:0}}/>
         </div>
 
         {/* ── Кнопка «Вниз» — как в Telegram ── */}
@@ -8925,7 +9005,11 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           </div>
         )}
 
-        {/* Attach panel */}
+
+        {/* Input */}
+        {canWrite?(
+          <div ref={imeDockRef} data-rmg-dock="" style={{position:"absolute",left:0,right:0,bottom:0,zIndex:120}}>
+          {/* Attach panel */}
         {attachMounted&&!showEmoji&&(
           <div style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",animation:attachClosing?"slideDown 0.2s ease forwards":"slideUp 0.2s ease"}} onClick={e=>e.stopPropagation()}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9}}>
@@ -8938,10 +9022,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             </div>
           </div>
         )}
-
-        {/* Input */}
-        {canWrite?(
-          <div style={{padding:"7px 9px",paddingBottom:showEmoji?7:"max(7px,env(safe-area-inset-bottom,7px))",background:surface+"E8",borderTop:`1px solid ${border}`,backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",flexShrink:0}} onClick={e=>e.stopPropagation()}>
+          <div style={{padding:"7px 9px",paddingBottom:showEmoji?7:"max(7px,env(safe-area-inset-bottom,7px))",background:surface,borderTop:`1px solid ${border}`,flexShrink:0}} onClick={e=>e.stopPropagation()}>
             {online&&editMsg&&(
               <div style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:surface2,borderLeft:`3px solid ${accent}`,marginBottom:4}}>
                 <div style={{flex:1,minWidth:0}}>
@@ -9046,10 +9127,6 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
               </div>
             )}
           </div>
-        ):(
-          <div style={{padding:14,background:surface,borderTop:`1px solid ${border}`,textAlign:"center",color:text2,fontSize:13}}>📢 Только администратор может публиковать</div>
-        )}
-
         {/* Emoji panel — РАСПОЛОЖЕНА ПОД ИНПУТОМ (как в WhatsApp/Telegram).
             Всегда смонтирована, чтобы анимация закрытия проигрывалась корректно. */}
         <div onClick={e=>e.stopPropagation()} onMouseDown={e=>{if(showEmoji)e.preventDefault();}} style={showAttach?{display:"none"}:{flexShrink:0}}>
@@ -9097,6 +9174,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             onSticker={e=>{sendMsg({type:"sticker",text:e});playSound("sent");closeEmojiPanel();}}
             onClose={()=>closeEmojiPanel()}/>
         </div>
+          </div>
+        ):(
+          <div style={{padding:14,background:surface,borderTop:`1px solid ${border}`,textAlign:"center",color:text2,fontSize:13}}>📢 Только администратор может публиковать</div>
+        )}
+
+
 
         <input ref={fileRef} type="file" accept="image/*,audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus,.pdf,.doc,.docx,.zip,.txt,.xls,.xlsx" onChange={handleFileWithProgress} style={{display:"none"}}/>
         <input ref={galleryRef} type="file" accept="image/*,video/*" multiple onChange={handleFileWithProgress} style={{display:"none"}}/>
@@ -10410,6 +10493,13 @@ export default function App(){
     .rmg-press:active{transform:scale(0.88);opacity:0.7}
     .rmg-skel{background:linear-gradient(90deg,rgba(128,128,128,0.14) 25%,rgba(128,128,128,0.3) 50%,rgba(128,128,128,0.14) 75%);background-size:200% 100%;animation:skelShimmer 1.15s linear infinite}
     @keyframes skelShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+    /* Плавная клавиатура: на время движения IME отключаем дорогой backdrop-filter
+       у нижних блоков чата — пересчёт блюра на каждом кадре давал «30 fps».
+       Фон панели подменяем полупрозрачным цветом, чтобы не было просветов. */
+    /* Док ездит композиторным transform'ом с очень коротким переходом
+       (сглаживает батчинг нативных кадров, не отставая от клавиатуры).
+       Список НЕ трансформируется: он скроллится (дёшево, без GPU-слоёв). */
+
     input,textarea{transition:border-color 0.25s ease,box-shadow 0.25s ease,background 0.25s ease}
 
     ${isGlass ? `
