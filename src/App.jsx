@@ -1358,6 +1358,11 @@ const contrastOn=hex=>{
   const r=parseInt(h.slice(0,2),16),g=parseInt(h.slice(2,4),16),b=parseInt(h.slice(4,6),16);
   return(0.299*r+0.587*g+0.114*b)/255>0.6?"#000":"#fff";
 };
+// Полупрозрачный чёрный/белый поверх "своего" пузыря сообщения — подбирается
+// по тому же принципу, что и contrastOn(), чтобы вспомогательный текст/иконки
+// (время, реплай, реакции и т.п.) не терялись, если акцентный цвет светлый
+// (например тема с белым акцентом даёт светлый градиент пузыря).
+const mineRgba=(accentHex,a)=>contrastOn(accentHex)==="#000"?`rgba(0,0,0,${a})`:`rgba(255,255,255,${a})`;
 const dominantColorFromImage=(url,fallback="#E53935")=>new Promise(resolve=>{
   if(!url){resolve(fallback);return;}
   try{
@@ -1505,7 +1510,7 @@ function Avatar({name,size=42,online=false,photo=null,onClick=null}){
 // ─── Waveform ────────────────────────────────────────────────────────────────
 function Waveform({wf,progress=0,fromMe}){
   const {accent}=useContext(ThemeCtx);
-  const c=fromMe?"rgba(255,255,255,0.9)":accent;
+  const c=fromMe?mineRgba(accent,0.9):accent;
   return(
     <div style={{display:"flex",alignItems:"center",gap:2,height:24}}>
       {(wf||[]).map((h,i)=><div key={i} style={{width:3,borderRadius:3,height:Math.max(3,h),background:i/wf.length<progress?c:`${c}28`}}/>)}
@@ -1575,12 +1580,12 @@ function VoiceBubble({msg,fromMe,chatId}){
 
   return(
     <div style={{display:"flex",alignItems:"center",gap:10,minWidth:200}}>
-      <button onClick={toggle} style={{width:42,height:42,borderRadius:"50%",border:"none",cursor:"pointer",background:err?"rgba(255,59,48,0.3)":fromMe?"rgba(255,255,255,0.2)":accent,color:"#fff",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"transform 0.15s",transform:playing?"scale(0.88)":"scale(1)"}}>
+      <button onClick={toggle} style={{width:42,height:42,borderRadius:"50%",border:"none",cursor:"pointer",background:err?"rgba(255,59,48,0.3)":fromMe?mineRgba(accent,0.2):accent,color:fromMe?contrastOn(accent):"#fff",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"transform 0.15s",transform:playing?"scale(0.88)":"scale(1)"}}>
         {err?"✕":playing?"⏸":"▶"}
       </button>
       <div style={{flex:1}}>
         <Waveform wf={wf} progress={prog} fromMe={fromMe}/>
-        <div style={{fontSize:11,color:fromMe?"rgba(255,255,255,0.45)":text2,marginTop:2}}>{dur}</div>
+        <div style={{fontSize:11,color:fromMe?mineRgba(accent,0.45):text2,marginTop:2}}>{dur}</div>
       </div>
     </div>
   );
@@ -1630,15 +1635,15 @@ function AudioBubble({msg,fromMe,audioMsgs,chatId}){
   const sizeMb=msg.fileSize?(msg.fileSize/1024/1024).toFixed(1)+"MB":"";
   return(
     <div style={{display:"flex",alignItems:"center",gap:10,minWidth:220,maxWidth:280}}>
-      <button onClick={toggle} style={{width:46,height:46,borderRadius:"50%",border:"none",cursor:"pointer",flexShrink:0,background:fromMe?"rgba(255,255,255,0.22)":accent,color:"#fff",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.15s",transform:isPlaying?"scale(0.88)":"scale(1)"}}>
+      <button onClick={toggle} style={{width:46,height:46,borderRadius:"50%",border:"none",cursor:"pointer",flexShrink:0,background:fromMe?mineRgba(accent,0.22):accent,color:fromMe?contrastOn(accent):"#fff",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.15s",transform:isPlaying?"scale(0.88)":"scale(1)"}}>
         {isPlaying?"⏸":"▶"}
       </button>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:13,fontWeight:600,color:fromMe?"#fff":text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>🎵 {name}</div>
-        <div style={{height:3,background:fromMe?"rgba(255,255,255,0.25)":"rgba(0,0,0,0.15)",borderRadius:2,overflow:"hidden",marginBottom:4}}>
-          <div style={{height:"100%",width:(progress*100)+"%",background:fromMe?"rgba(255,255,255,0.85)":accent,borderRadius:2,transition:"width 0.1s linear"}}/>
+        <div style={{fontSize:13,fontWeight:600,color:fromMe?contrastOn(accent):text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>🎵 {name}</div>
+        <div style={{height:3,background:fromMe?mineRgba(accent,0.25):"rgba(0,0,0,0.15)",borderRadius:2,overflow:"hidden",marginBottom:4}}>
+          <div style={{height:"100%",width:(progress*100)+"%",background:fromMe?mineRgba(accent,0.85):accent,borderRadius:2,transition:"width 0.1s linear"}}/>
         </div>
-        <div style={{fontSize:10,color:fromMe?"rgba(255,255,255,0.5)":text2,display:"flex",gap:6}}>
+        <div style={{fontSize:10,color:fromMe?mineRgba(accent,0.5):text2,display:"flex",gap:6}}>
           <span>{isActive?fmt(curTime):"0:00"}</span>{sizeMb&&<span>· {sizeMb}</span>}<span>· {ext}</span>
         </div>
       </div>
@@ -1834,12 +1839,12 @@ function AudioPlayer({msg,fromMe}){
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
         <div style={{position:"relative",flexShrink:0}}>
           <div style={{width:46,height:46,borderRadius:12,
-            background:fromMe?"rgba(255,255,255,0.15)":accent+"22",
+            background:fromMe?mineRgba(accent,0.15):accent+"22",
             display:"flex",alignItems:"center",justifyContent:"center",
             overflow:"hidden",boxShadow:isPlaying?`0 0 14px ${accent}66`:"none",transition:"box-shadow 0.3s"}}>
             {msg.coverUrl
               ?<img src={msg.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              :<IcMusicNote size={22} color={fromMe?"#fff":accent}/>}
+              :<IcMusicNote size={22} color={fromMe?contrastOn(accent):accent}/>}
           </div>
           <button onClick={toggle} style={{position:"absolute",inset:0,borderRadius:12,border:"none",cursor:"pointer",
             background:isPlaying?"rgba(0,0,0,0.4)":"rgba(0,0,0,0.25)",color:"#fff",fontSize:14,
@@ -1848,8 +1853,8 @@ function AudioPlayer({msg,fromMe}){
           </button>
         </div>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{color:fromMe?"#fff":text,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name.replace(/\.(mp3|m4a|flac|wav|aac|ogg|wma|aiff|ape)$/i,"")}</div>
-          <div style={{color:fromMe?"rgba(255,255,255,0.55)":text2,fontSize:11,marginTop:1}}>{size}{size?" · ":""}Аудио</div>
+          <div style={{color:fromMe?contrastOn(accent):text,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name.replace(/\.(mp3|m4a|flac|wav|aac|ogg|wma|aiff|ape)$/i,"")}</div>
+          <div style={{color:fromMe?mineRgba(accent,0.55):text2,fontSize:11,marginTop:1}}>{size}{size?" · ":""}Аудио</div>
         </div>
       </div>
       <div style={{display:"flex",alignItems:"flex-end",gap:2,height:28,marginBottom:4,cursor:"pointer"}}
@@ -1860,13 +1865,13 @@ function AudioPlayer({msg,fromMe}){
         }}>
         {wf.map((h,i)=>(
           <div key={i} style={{flex:1,borderRadius:2,height:Math.max(3,h),
-            background:i/wf.length<progress?(fromMe?"rgba(255,255,255,0.9)":accent):(fromMe?"rgba(255,255,255,0.25)":accent+"33"),
+            background:i/wf.length<progress?(fromMe?mineRgba(accent,0.9):accent):(fromMe?mineRgba(accent,0.25):accent+"33"),
             transition:"background 0.08s"}}/>
         ))}
       </div>
       <div style={{display:"flex",justifyContent:"space-between"}}>
-        <span style={{color:fromMe?"rgba(255,255,255,0.5)":text2,fontSize:10}}>{fmt(curTime)}</span>
-        <span style={{color:fromMe?"rgba(255,255,255,0.5)":text2,fontSize:10}}>{fmt(durTime)}</span>
+        <span style={{color:fromMe?mineRgba(accent,0.5):text2,fontSize:10}}>{fmt(curTime)}</span>
+        <span style={{color:fromMe?mineRgba(accent,0.5):text2,fontSize:10}}>{fmt(durTime)}</span>
       </div>
     </div>
   );
@@ -1929,6 +1934,13 @@ const IcAudioDownload=_ic("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z");
 const IcChevronDown=_ic("M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z");
 const IcMusicNote=_ic("M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z");
 const IcClipboard=_ic("M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm7 16H5V5h2v3h10V5h2v14z");
+
+// ─── Player screen (Мимоза-style) icons ──────────────────────────────────────
+const IcMoreH=_ic("M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z");
+const IcAddCircle=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z");
+const IcSpeedGauge=_ic("M20.38 8.57l-1.23 1.85a8 8 0 0 1-.22 7.58H5.07A8 8 0 0 1 15.58 6.85l1.85-1.23A10 10 0 0 0 3.35 19a2 2 0 0 0 1.72 1h13.85a2 2 0 0 0 1.74-1 10 10 0 0 0-.27-10.44zm-9.79 6.84a2 2 0 0 0 2.83 0l5.66-8.49-8.49 5.66a2 2 0 0 0 0 2.83z");
+const IcEqualizer=_ic("M10 20h4V4h-4v16zm-6 0h4v-8H4v8zM16 9v11h4V9h-4z");
+const IcDeviceSm=_ic("M17 1H7c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-2-2-2zm0 18H7V4h10v15z");
 const IcGlobe=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm7.93 9h-3.02c-.15-2.19-.65-4.16-1.4-5.62A8.03 8.03 0 0 1 19.93 11zM12 4.06c.87 1.15 1.7 3.14 1.93 6.94h-3.86c.23-3.8 1.06-5.79 1.93-6.94zM4.07 13h3.02c.15 2.19.65 4.16 1.4 5.62A8.03 8.03 0 0 1 4.07 13zm3.02-2H4.07a8.03 8.03 0 0 1 4.42-5.62C7.74 6.84 7.24 8.81 7.09 11zM12 19.94c-.87-1.15-1.7-3.14-1.93-6.94h3.86c-.23 3.8-1.06 5.79-1.93 6.94zM13.91 13h3.02a8.03 8.03 0 0 1-4.42 5.62c.75-1.46 1.25-3.43 1.4-5.62z");
 const IcSend=_ic("M2.01 21L23 12 2.01 3 2 10l15 2-15 2z");
 const IcRobot=_ic("M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7v1h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v1H4v-1H3a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1v-1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2zM8.5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm7 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z");
@@ -1959,6 +1971,9 @@ const IcMusic=_ic("M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 
 const IcTrash=_ic("M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z");
 const IcTrashAll=_ic("M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zm2.46-7.12l1.41-1.41L12 12.59l2.12-2.12 1.41 1.41L13.41 14l2.12 2.12-1.41 1.41L12 15.41l-2.12 2.12-1.41-1.41L10.59 14l-2.13-2.12zM15.5 4l-1-1h-5l-1 1H5v2h14V4h-3.5z");
 const IcImage=_ic("M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z");
+// Иконка "фон" — стопка фото (photo_library), визуально отличается от обычной
+// галереи (IcImage) при выборе фонового изображения профиля.
+const IcImageBg=_ic("M22 16V4c0-1.1-.9-2-2-2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2zM11 12l2.03 2.71L16 11l4 5H8l3-4zM2 6v14c0 1.1.9 2 2 2h14v-2H4V6H2z");
 const IcFileDoc=_ic("M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z");
 const IcCircleVid=_ic("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm-2-12.5v9l6-4.5-6-4.5z");
 const IcPin=_ic("M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z");
@@ -1978,6 +1993,10 @@ const IcHistory=_ic("M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.
 
 const IcGhost=_ic("M12 2C7.58 2 4 5.58 4 10v10l2.5-2 2.5 2 3-2.5 3 2.5 2.5-2 2.5 2V10c0-4.42-3.58-8-8-8zm-3 8c-.83 0-1.5-.67-1.5-1.5S8.17 7 9 7s1.5.67 1.5 1.5S9.83 10 9 10zm6 0c-.83 0-1.5-.67-1.5-1.5S14.17 7 15 7s1.5.67 1.5 1.5S15.83 10 15 10z");
 const IcHelpQ=_ic("M11 18h2v-2h-2v2zm1-16C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-2.21 0-4 1.79-4 4h2c0-1.1.9-2 2-2s2 .9 2 2c0 2-3 1.75-3 5h2c0-2.25 3-2.5 3-5 0-2.21-1.79-4-4-4z");
+// ─── Profile achievements screen icons ───────────────────────────────────────
+const IcShareOut=_ic("M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L7.04 9.81C6.5 9.31 5.79 9 5 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z");
+const IcTrophy=_ic("M19 5h-2V3H7v2H5c-1.1 0-2 .9-2 2v1c0 2.55 1.92 4.63 4.39 4.94.63 1.5 1.98 2.63 3.61 2.96V18H7v2h10v-2h-4v-2.1c1.63-.33 2.98-1.46 3.61-2.96C19.08 12.63 21 10.55 21 8V7c0-1.1-.9-2-2-2zM5 8V7h2v3.82C5.84 10.4 5 9.3 5 8zm14 0c0 1.3-.84 2.4-2 2.82V7h2v1z");
+const IcCalendarSm=_ic("M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z");
 
 let _appConfirmShow=null;
 const appConfirm=(msg,okLabel="Да")=>new Promise(res=>{if(_appConfirmShow)_appConfirmShow({msg,okLabel,res});else res(window.confirm(msg));});
@@ -3152,16 +3171,16 @@ function FileBubble({msg,fromMe,onOpenLightbox,chatId}){
     return(
       <div style={{display:"flex",alignItems:"center",gap:10,minWidth:180,opacity:0.85}}>
         <div style={{width:44,height:44,borderRadius:12,
-          background:fromMe?"rgba(255,255,255,0.14)":accent+"22",
+          background:fromMe?mineRgba(accent,0.14):accent+"22",
           display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-          <IcPaperclip size={20} color={fromMe?"#fff":accent}/>
+          <IcPaperclip size={20} color={fromMe?contrastOn(accent):accent}/>
         </div>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{color:fromMe?"rgba(255,255,255,0.9)":text,fontSize:13,fontWeight:600,
+          <div style={{color:fromMe?mineRgba(accent,0.9):text,fontSize:13,fontWeight:600,
             overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}}>
             {msg.fileName||(shExt!=="FILE"?shExt+"-файл":"Файл")}
           </div>
-          <div style={{color:fromMe?"rgba(255,255,255,0.5)":text2,fontSize:11,marginTop:2}}>
+          <div style={{color:fromMe?mineRgba(accent,0.5):text2,fontSize:11,marginTop:2}}>
             {msg.fileSize?fmtSize(msg.fileSize)+" · ":""}не сохранён офлайн
           </div>
         </div>
@@ -3222,16 +3241,16 @@ function FileBubble({msg,fromMe,onOpenLightbox,chatId}){
         }
       }}>
       <div style={{width:44,height:44,borderRadius:12,
-        background:fromMe?"rgba(255,255,255,0.18)":accent+"33",
+        background:fromMe?mineRgba(accent,0.18):accent+"33",
         display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-        <span style={{color:fromMe?"#fff":accent,fontSize:10,fontWeight:800}}>{ext}</span>
+        <span style={{color:fromMe?contrastOn(accent):accent,fontSize:10,fontWeight:800}}>{ext}</span>
       </div>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{color:fromMe?"rgba(255,255,255,0.9)":text,fontSize:13,fontWeight:600,
+        <div style={{color:fromMe?mineRgba(accent,0.9):text,fontSize:13,fontWeight:600,
           overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}}>
           {msg.fileName||"Файл"}
         </div>
-        <div style={{color:fromMe?"rgba(255,255,255,0.5)":text2,fontSize:11,marginTop:2}}>
+        <div style={{color:fromMe?mineRgba(accent,0.5):text2,fontSize:11,marginTop:2}}>
           {msg.fileSize?fmtSize(msg.fileSize):""} ↓
         </div>
       </div>
@@ -3265,6 +3284,8 @@ function ReplyBar({msg,onCancel}){
 function ReplyInBubble({msg,fromMe}){
   const {accent,text2}=useContext(ThemeCtx);
   if(!msg)return null;
+  const mineDark=fromMe&&contrastOn(accent)==="#000";
+  const mineSoft=(a)=>mineDark?`rgba(0,0,0,${a})`:`rgba(255,255,255,${a})`;
   const isImg=msg.type==="image"||(msg.type==="file"&&msg.fileType?.startsWith("image/"));
   const isVideo=msg.type==="video";
   const isVoice=msg.type==="voice";
@@ -3280,7 +3301,7 @@ function ReplyInBubble({msg,fromMe}){
     :msg.text||"";
   const thumbSrc=isImg?(msg.fileData||msg.fileUrl):isCircle?(msg.videoThumb||msg.videoUrl||msg.videoData):isVideo?(msg.videoThumb||msg.fileUrl||msg.fileData):null;
   return(
-    <div style={{display:"flex",alignItems:"center",gap:6,borderLeft:`2.5px solid ${fromMe?"rgba(255,255,255,0.5)":accent}`,paddingLeft:7,marginBottom:6,opacity:0.88}}>
+    <div style={{display:"flex",alignItems:"center",gap:6,borderLeft:`2.5px solid ${fromMe?mineSoft(0.5):accent}`,paddingLeft:7,marginBottom:6,opacity:0.88}}>
       {thumbSrc&&(
         <div style={{width:32,height:32,borderRadius:6,overflow:"hidden",flexShrink:0}}>
           {isCircle
@@ -3289,10 +3310,10 @@ function ReplyInBubble({msg,fromMe}){
           }
         </div>
       )}
-      {isVoice&&<IcMic size={15} color={fromMe?"rgba(255,255,255,0.75)":accent}/>}
+      {isVoice&&<IcMic size={15} color={fromMe?mineSoft(0.75):accent}/>}
       <div style={{flex:1,minWidth:0}}>
-        <div style={{color:fromMe?"rgba(255,255,255,0.75)":accent,fontSize:11,fontWeight:700,marginBottom:1}}>{msg.author}</div>
-        <div style={{color:fromMe?"rgba(255,255,255,0.55)":text2,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}}>{preview}</div>
+        <div style={{color:fromMe?mineSoft(0.75):accent,fontSize:11,fontWeight:700,marginBottom:1}}>{msg.author}</div>
+        <div style={{color:fromMe?mineSoft(0.55):text2,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:160}}>{preview}</div>
       </div>
     </div>
   );
@@ -4145,8 +4166,55 @@ function StoriesBar({currentUser,profile}){
   );
 }
 
-function ProfileView({uid,myUid,onClose,onStartChat}){
+function fmtListenTime(totalSec){
+  const h=Math.floor((totalSec||0)/3600), m=Math.floor(((totalSec||0)%3600)/60);
+  if(!h&&!m)return "0 мин";
+  return (h?`${h} ч `:"")+`${m} мин`;
+}
+function fmtJoinedDate(ms){
+  if(!ms)return "";
+  const d=new Date(ms);
+  return `${String(d.getDate()).padStart(2,"0")}.${String(d.getMonth()+1).padStart(2,"0")}.${d.getFullYear()}`;
+}
+const CREATOR_UID="738cdd2c759b7fd3204d9dffcae0e176";
+const hasAllAchievements=u=>u?.uid===CREATOR_UID;
+const achievementIsUnlocked=(u,id,condition=false)=>hasAllAchievements(u)||(Array.isArray(u?.achievementIds)&&u.achievementIds.includes(id))||condition;
+const ach=(id,title,tier,desc,color,check,current=()=>0,target=1,extra={})=>({
+  id,title,tier,desc,color,...extra,
+  unlocked:u=>achievementIsUnlocked(u,id,check(u)),
+  progress:u=>Math.min(1,current(u)/target),
+  progressLabel:u=>target===1?(current(u)?"Готово":"0/1"):String(current(u))+"/"+String(target)+(extra.unit||"")
+});
+
+const ACHIEVEMENTS=[
+  ach("avatar","Лицо с обложки","ОБЫЧНОЕ","Поставить фото или картинку на аватар","#8c96a3",u=>!!u.photo,u=>u.photo?1:0),
+  ach("profile_complete","Расскажи о себе","ОБЫЧНОЕ","Полностью заполнить профиль","#8c96a3",u=>!!(u.photo&&u.name&&u.tag&&u.bio),u=>[u.photo,u.name,u.tag,u.bio].filter(Boolean).length,4),
+  ach("first_contact","Первый контакт","ОБЫЧНОЕ","Добавить кого-нибудь в контакты","#8c96a3",u=>(u.contactsAddedCount||0)>0,u=>u.contactsAddedCount||0),
+  ach("first_voice","Голос за кадром","ОБЫЧНОЕ","Отправить первое голосовое сообщение","#8c96a3",u=>(u.voiceMessagesSentCount||0)>0,u=>u.voiceMessagesSentCount||0),
+  ach("photographer","Фотограф","ОБЫЧНОЕ","Отправить 10 фотографий","#8c96a3",u=>(u.photosSentCount||0)>=10,u=>u.photosSentCount||0,10),
+  ach("reactions","Эмоции на максимум","ОБЫЧНОЕ","Поставить 10 разных реакций","#8c96a3",u=>(u.reactionTypes||[]).length>=10,u=>(u.reactionTypes||[]).length,10),
+  ach("in_thread","В теме","ОБЫЧНОЕ","Ответить на сообщение через «Ответить»","#8c96a3",u=>!!u.hasReplied,u=>u.hasReplied?1:0),
+  ach("pin","Закреп","ОБЫЧНОЕ","Закрепить сообщение или чат","#8c96a3",u=>!!u.hasPinned,u=>u.hasPinned?1:0),
+  ach("custom_style","Свой стиль","ОБЫЧНОЕ","Сменить тему оформления","#f28c28",u=>!!u.hasChangedTheme,u=>u.hasChangedTheme?1:0),
+  ach("night_owl","Ночная сова","ОБЫЧНОЕ","Отправить сообщение между 03:00 и 05:00","#32363d",u=>!!u.hasNightMessage,u=>u.hasNightMessage?1:0),
+  ach("notes","Заметки на полях","ОБЫЧНОЕ","Сохранить 10 сообщений в «Избранное»","#8c96a3",u=>(u.favoritesSavedCount||0)>=10,u=>u.favoritesSavedCount||0,10),
+  ach("dj","Диджей","ОБЫЧНОЕ","Поделиться треком с другом","#8c96a3",u=>!!u.hasSharedTrack,u=>u.hasSharedTrack?1:0),
+  ach("login_streak","Вернулся!","ПРОДВИНУТОЕ","Заходить 90 дней подряд","#ff9f0a",u=>(u.loginStreak||0)>=90,u=>u.loginStreak||0,90,{unit:" дней"}),
+  ach("social_soul","Душа компании","ПРОДВИНУТОЕ","Набрать 50 контактов","#34c759",u=>(u.contactsAddedCount||0)>=50,u=>u.contactsAddedCount||0,50),
+  ach("referral","Сарафанное радио","ПРОДВИНУТОЕ","Пригласить 5 друзей, которые зарегистрировались","#0a84ff",u=>(u.referralsRegisteredCount||0)>=5,u=>u.referralsRegisteredCount||0,5),
+  ach("organizer","Организатор","ЭЛИТНОЕ","Создать группу, в которой больше 100 участников","#f28c28",u=>(u.largestGroupMembers||0)>100,u=>u.largestGroupMembers||0,101),
+  ach("talker","Болтун","ЭЛИТНОЕ","Отправить 10 000 сообщений","#ff453a",u=>(u.messagesSentCount||0)>=10000,u=>u.messagesSentCount||0,10000),
+  ach("phoenix","Феникс","ЭЛИТНОЕ","Вернуться после 90 дней отсутствия","#f5f5f7",u=>!!u.hasReturnedAfter90Days,u=>u.hasReturnedAfter90Days?1:0),
+  ach("veteran","Ветеран","ЭЛИТНОЕ","365 дней с мессенджером","#ff453a",u=>(u.accountAgeDays||0)>=365,u=>u.accountAgeDays||0,365,{unit:" дней"}),
+  ach("founder","Основатель","ЭЛИТНОЕ","Быть в числе первых 1000 пользователей","#ff375f",u=>!!u.isFounder,u=>u.isFounder?1:0,1,{rainbow:true}),
+  ach("team","Теперь на «мы»!","ЭКСКЛЮЗИВНОЕ","Быть в команде RedMrxGram","#f5f5f7",u=>!!u.isTeamMember,u=>u.isTeamMember?1:0,1,{exclusive:true}),
+  ach("creator","Создатель","ЭКСКЛЮЗИВНОЕ","Создатель RedMrxGram","#f5f5f7",u=>u.uid===CREATOR_UID,u=>u.uid===CREATOR_UID?1:0,1,{exclusive:true}),
+];
+const ACHIEVEMENTS_PAGE_SIZE=4;
+const ACHIEVEMENTS_EQUIP_CAP=15;
+function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
+  const audio=useContext(AudioCtx);
   const[user,setUser]=useState(null);
   const[blocked,setBlocked]=useState(false);
   const[showMenu,setShowMenu]=useState(false);
@@ -4158,6 +4226,15 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
   const[myProfile,setMyProfile]=useState(null);
   const[qrDataUrl,setQrDataUrl]=useState("");
   const[closing,setClosing]=useState(false);
+  const[avatarBusy,setAvatarBusy]=useState(false);
+  const[achPage,setAchPage]=useState(0);
+  const[draftName,setDraftName]=useState("");
+  const[draftTag,setDraftTag]=useState("");
+  const[draftBio,setDraftBio]=useState("");
+  const[profileSaving,setProfileSaving]=useState(false);
+  const[profileError,setProfileError]=useState("");
+  const isMe=uid===myUid;
+  const avatarFileRef=useRef();
   const requestClose=useCallback(()=>{
     setClosing(true);
     setTimeout(()=>onClose?.(),240);
@@ -4170,8 +4247,15 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
 
   useEffect(()=>{
     if(!uid)return;
+    // Свой профиль слушаем в реальном времени — счётчик прослушивания/пин трека
+    // должны обновляться сразу без перезахода на экран.
+    if(uid===myUid){
+      return onSnapshot(doc(db,"users",uid),s=>{
+        if(s.exists())setUser({uid,...s.data()});
+      },()=>{});
+    }
     getDoc(doc(db,"users",uid)).then(async s=>{
-      const d=s.exists()?{...s.data()}:null;
+      const d=s.exists()?{uid,...s.data()}:null;
       if(d&&uid!==myUid&&!(typeof d.photo==="string"&&d.photo.startsWith("data:"))){
         // Фолбэк как в Telegram: берём фото из общего чата, если в профиле пусто/битая ссылка
         try{
@@ -4182,6 +4266,10 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
       }
       if(d)setUser(d);
     });
+  },[uid,myUid]);
+
+  useEffect(()=>{
+    if(!myUid)return;
     getDoc(doc(db,"users",myUid)).then(s=>{
       if(s.exists()){
         const d=s.data();
@@ -4204,6 +4292,13 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
       dominantColorFromImage(user.photo,fallback).then(setProfileTone);
     }
   },[user?.photo,user?.name]);
+
+  useEffect(()=>{
+    if(!isMe||!user)return;
+    setDraftName(user.name||"");
+    setDraftTag(user.tag||"");
+    setDraftBio(user.bio||"");
+  },[isMe,user?.name,user?.tag,user?.bio]);
 
   useEffect(()=>{
     if(!uid||!user)return;
@@ -4262,7 +4357,186 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
         createdAt:serverTimestamp()
       },{merge:true});
       setContactAdded(true);
+      updateDoc(doc(db,"users",myUid),{contactsAddedCount:increment(1)}).catch(()=>{});
     }catch(e){}
+  };
+
+  // ── Своя аватарка: смена/удаление прямо с экрана профиля ─────────────────
+  // Та же логика ресайза в 300×300 base64, что и в EditProfile — фото
+  // хранится прямо в документе пользователя, без отдельной загрузки на сервер.
+  const pickAvatar=(e)=>{
+    const file=e.target.files[0];if(!file)return;
+    e.target.value="";
+    setAvatarBusy(true);
+    const url=URL.createObjectURL(file);
+    const img=new Image();img.src=url;
+    img.onerror=()=>{setAvatarBusy(false);URL.revokeObjectURL(url);};
+    img.onload=async()=>{
+      const canvas=document.createElement("canvas"),size=Math.min(img.width,img.height);
+      canvas.width=300;canvas.height=300;
+      canvas.getContext("2d").drawImage(img,(img.width-size)/2,(img.height-size)/2,size,size,0,0,300,300);
+      const b64=canvas.toDataURL("image/jpeg",0.75);
+      URL.revokeObjectURL(url);
+      await saveAvatar(b64);
+    };
+  };
+  const saveAvatar=async(photoOrNull)=>{
+    const previousPhoto=user?.photo||null;
+    setProfileError("");
+    setUser(prev=>prev?{...prev,photo:photoOrNull}:prev);
+    onProfileChange?.({photo:photoOrNull});
+    try{
+      await setDoc(doc(db,"users",myUid),{photo:photoOrNull,lastSeen:serverTimestamp()},{merge:true});
+      await updateProfile(auth.currentUser,{photoURL:photoOrNull||""}).catch(()=>{});
+      try{
+        const chatsSnap=await getDocs(query(collection(db,"chats"),where("members","array-contains",myUid)));
+        await Promise.all(chatsSnap.docs.map(d=>{
+          const data=d.data();
+          if(data.type==="direct"&&data.names?.[myUid])return updateDoc(d.ref,{[`photos.${myUid}`]:photoOrNull||""});
+          return null;
+        }).filter(Boolean));
+      }catch(e2){}
+    }catch(e){
+      console.error("Avatar save error:",e);
+      setUser(prev=>prev?{...prev,photo:previousPhoto}:prev);
+      onProfileChange?.({photo:previousPhoto});
+      setProfileError("Не удалось обновить фото профиля.");
+    }finally{
+      setAvatarBusy(false);
+    }
+  };
+  const removeAvatar=async()=>{
+    if(!user?.photo)return;
+    if(!await appConfirm("Удалить фото профиля?","Удалить"))return;
+    setAvatarBusy(true);
+    await saveAvatar(null);
+  };
+
+  // ── Фон профиля (баннер за аватаркой) — отдельное поле bgPhoto, не квадрат:
+  // ужимаем по ширине до 800px с сохранением пропорций, а не кропаем в квадрат.
+  const[bgBusy,setBgBusy]=useState(false);
+  const bgFileRef=useRef();
+  const saveBackground=async(bgPhoto)=>{
+    const previousBg=user?.bgPhoto||null;
+    setProfileError("");
+    setUser(prev=>prev?{...prev,bgPhoto}:prev);
+    onProfileChange?.({bgPhoto});
+    try{
+      await setDoc(doc(db,"users",myUid),{bgPhoto},{merge:true});
+    }catch(e){
+      console.error("Profile background save error:",e);
+      setUser(prev=>prev?{...prev,bgPhoto:previousBg}:prev);
+      onProfileChange?.({bgPhoto:previousBg});
+      setProfileError("Не удалось обновить фон профиля.");
+    }finally{
+      setBgBusy(false);
+    }
+  };
+  const pickBg=(e)=>{
+    const file=e.target.files[0];if(!file)return;
+    e.target.value="";
+    setBgBusy(true);
+    const url=URL.createObjectURL(file);
+    const img=new Image();img.src=url;
+    img.onerror=()=>{setBgBusy(false);URL.revokeObjectURL(url);};
+    img.onload=async()=>{
+      const maxW=800,scale=Math.min(1,maxW/img.width);
+      const w=Math.round(img.width*scale),h=Math.round(img.height*scale);
+      const canvas=document.createElement("canvas");
+      canvas.width=w;canvas.height=h;
+      canvas.getContext("2d").drawImage(img,0,0,w,h);
+      const b64=canvas.toDataURL("image/jpeg",0.75);
+      URL.revokeObjectURL(url);
+      await saveBackground(b64);
+    };
+  };
+  const toggleBg=async()=>{
+    if(bgBusy)return;
+    if(user?.bgPhoto){
+      if(!await appConfirm("Убрать фон профиля?","Убрать"))return;
+      setBgBusy(true);
+      await saveBackground(null);
+    }else{
+      bgFileRef.current?.click();
+    }
+  };
+
+  const saveProfileDetails=async()=>{
+    if(profileSaving)return;
+    const name=draftName.trim()||user.name||"";
+    const enteredTag=draftTag.trim().replace(/^@/,"").toLowerCase();
+    const tag=enteredTag||user.tag||"";
+    const bio=draftBio;
+    const previous={name:user.name||"",tag:user.tag||"",bio:user.bio||""};
+    const tagChanged=tag!==String(user.tag||"").toLowerCase();
+
+    setProfileSaving(true);
+    setProfileError("");
+    try{
+      if(tagChanged&&tag){
+        const tagCheck=await getDocs(query(collection(db,"users"),where("tag","==",tag)));
+        if(tagCheck.docs.some(d=>d.id!==myUid)){
+          setProfileError(`@${tag} уже занят`);
+          return;
+        }
+      }
+
+      const patch={name,tag,bio};
+      setUser(prev=>prev?{...prev,...patch}:prev);
+      onProfileChange?.(patch);
+      await setDoc(doc(db,"users",myUid),{...patch,lastSeen:serverTimestamp()},{merge:true});
+      await updateProfile(auth.currentUser,{displayName:name}).catch(()=>{});
+
+      try{
+        const chatsSnap=await getDocs(query(collection(db,"chats"),where("members","array-contains",myUid)));
+        await Promise.all(chatsSnap.docs.map(d=>{
+          const data=d.data();
+          if(data.type==="direct"&&data.names?.[myUid]){
+            return updateDoc(d.ref,{[`names.${myUid}`]:name});
+          }
+          return null;
+        }).filter(Boolean));
+      }catch(e2){}
+    }catch(e){
+      console.error("Profile details save error:",e);
+      setUser(prev=>prev?{...prev,...previous}:prev);
+      onProfileChange?.(previous);
+      setProfileError("Не удалось сохранить данные профиля.");
+    }finally{
+      setProfileSaving(false);
+    }
+  };
+
+  const unpinTrack=async()=>{
+    try{await setDoc(doc(db,"users",myUid),{pinnedTrack:null},{merge:true});}catch(e){}
+  };
+
+  // Значки под именем — теперь их выбирает сам пользователь ("одевает"/"снимает"),
+  // а не просто показываются все разблокированные подряд. При первом заходе,
+  // пока equippedIds ещё не задан, надеваем то, что уже разблокировано (не больше лимита),
+  // дальше — только вручную через toggleEquip.
+  useEffect(()=>{
+    if(!isMe||!user)return;
+    if(user.uid===CREATOR_UID){
+      const allIds=ACHIEVEMENTS.map(a=>a.id);
+      const equipped=["creator","team","founder","veteran","phoenix","talker","organizer","referral","social_soul","login_streak","night_owl","custom_style","dj","notes","reactions"];
+      if((user.achievementIds||[]).length!==allIds.length||user.equippedIds==null){
+        setDoc(doc(db,"users",myUid),{achievementIds:allIds,...(user.equippedIds==null?{equippedIds:equipped}:{})},{merge:true}).catch(()=>{});
+      }
+      return;
+    }
+    if(user.equippedIds!=null)return;
+    const initial=ACHIEVEMENTS.filter(a=>a.unlocked(user)).slice(0,ACHIEVEMENTS_EQUIP_CAP).map(a=>a.id);
+    if(!initial.length)return;
+    setDoc(doc(db,"users",myUid),{equippedIds:initial},{merge:true}).catch(()=>{});
+  },[isMe,myUid,user]);
+
+  const toggleEquip=async(id)=>{
+    if(!isMe)return;
+    const cur=user.equippedIds||[];
+    const next=cur.includes(id)?cur.filter(x=>x!==id):(cur.length>=ACHIEVEMENTS_EQUIP_CAP?cur:[...cur,id]);
+    if(next===cur)return; // лимит достигнут — молча игнорируем
+    try{await setDoc(doc(db,"users",myUid),{equippedIds:next},{merge:true});}catch(e){}
   };
 
   if(!user)return(
@@ -4279,6 +4553,11 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
   const profileLink=`https://redmrxgram.app/u/${encodeURIComponent(user.tag||uid)}`;
   const profileBg=(!bg||bg==="transparent"||String(bg).includes("rgba"))?"#050505":bg;
   const profileSurface=(String(surface).includes("rgba")||surface==="transparent")?"#120203":surface;
+  const unlockedAchievements=ACHIEVEMENTS.filter(a=>a.unlocked(user));
+  const pinnedIsPlaying=!!(user.pinnedTrack&&audio?.track?.id===user.pinnedTrack.id&&audio?.playing);
+  const equippedAchievements=(user.equippedIds||[]).map(id=>ACHIEVEMENTS.find(a=>a.id===id)).filter(Boolean);
+  const achPageCount=Math.ceil(ACHIEVEMENTS.length/ACHIEVEMENTS_PAGE_SIZE);
+  const pagedAchievements=ACHIEVEMENTS.slice(achPage*ACHIEVEMENTS_PAGE_SIZE,(achPage+1)*ACHIEVEMENTS_PAGE_SIZE);
 
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:600,backgroundColor:"#050505",backgroundImage:`linear-gradient(180deg,${alphaColor(profileAccent,.2)} 0%,#050505 290px,${profileBg} 100%)`,
@@ -4287,107 +4566,66 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
       WebkitAnimation:closing?"profileOut .24s cubic-bezier(0.4,0,0.2,1) forwards":"pageSlideIn 0.3s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
 
       {showMenu&&<div onClick={()=>setShowMenu(false)} style={{position:"fixed",inset:0,zIndex:39,background:"transparent"}}/>}
+      <input ref={avatarFileRef} type="file" accept="image/*" onChange={pickAvatar} style={{display:"none"}}/>
+      <input ref={bgFileRef} type="file" accept="image/*" onChange={pickBg} style={{display:"none"}}/>
 
       <div style={{position:"relative",minHeight:286,padding:"calc(max(env(safe-area-inset-top,24px),24px) + 72px) 18px 20px",overflow:"hidden",
         background:`radial-gradient(circle at 50% -10%,${alphaColor(profileAccent,.42)} 0%,transparent 48%),linear-gradient(180deg,${alphaColor(profileAccent,.16)} 0%,rgba(0,0,0,.78) 72%,#050505 100%),#050505`}}>
+        {user.bgPhoto&&(
+          <>
+            <img src={user.bgPhoto} alt="" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:0,pointerEvents:"none"}}/>
+            <div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",
+              background:`radial-gradient(circle at 50% -10%,${alphaColor(profileAccent,.32)} 0%,transparent 48%),linear-gradient(180deg,rgba(0,0,0,.35) 0%,rgba(0,0,0,.82) 72%,#050505 100%)`}}/>
+          </>
+        )}
         <div style={{position:"fixed",top:0,left:0,right:0,zIndex:40,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"max(env(safe-area-inset-top,24px),24px) 18px 10px",background:`linear-gradient(180deg,${alphaColor(profileAccent,.36)} 0%,rgba(5,5,5,.82) 100%)`,backdropFilter:"blur(22px)",WebkitBackdropFilter:"blur(22px)",borderBottom:"1px solid rgba(255,255,255,.08)"}}>
-          <button onClick={requestClose} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>←</button>
+          <button onClick={requestClose} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}><IcChevronDown size={22} style={{transform:"rotate(90deg)"}}/></button>
           <div style={{color:"#fff",fontWeight:900,fontSize:24,letterSpacing:0}}>Профиль</div>
-          <div style={{position:"relative"}}>
-            <button onClick={e=>{e.stopPropagation();setShowMenu(m=>!m);}} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:24,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>⋮</button>
-            {showMenu&&(
-              <div style={{position:"absolute",top:58,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",zIndex:41,overflow:"hidden"}} onClick={e=>e.stopPropagation()}>
-                {hasPhoto&&<button onClick={downloadAvatar} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}>Скачать фото</button>}
-                {uid!==myUid&&<button onClick={clearChat} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}>Очистить чат</button>}
-                {uid!==myUid&&<button onClick={toggleBlock} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:"#FF3B30",fontSize:14}}>{blocked?"Разблокировать":"Заблокировать"}</button>}
-              </div>
-            )}
-          </div>
+          {isMe?(
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={toggleBg} disabled={bgBusy} style={{width:44,height:44,borderRadius:"50%",background:user.bgPhoto?"rgba(255,255,255,.22)":"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)",opacity:bgBusy?0.6:1}}>{user.bgPhoto?<IcTrash size={19}/>:<IcImageBg size={19}/>}</button>
+              <button onClick={()=>avatarFileRef.current?.click()} disabled={avatarBusy} style={{width:44,height:44,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)",opacity:avatarBusy?0.6:1}}><IcImage size={20}/></button>
+              <button onClick={removeAvatar} disabled={avatarBusy||!hasPhoto} style={{width:44,height:44,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)",opacity:(avatarBusy||!hasPhoto)?0.4:1}}><IcTrash size={20}/></button>
+            </div>
+          ):(
+            <div style={{position:"relative"}}>
+              <button onClick={e=>{e.stopPropagation();setShowMenu(m=>!m);}} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}><IcMoreH size={22}/></button>
+              {showMenu&&(
+                <div style={{position:"absolute",top:58,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",zIndex:41,overflow:"hidden"}} onClick={e=>e.stopPropagation()}>
+                  {hasPhoto&&<button onClick={downloadAvatar} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}><IcSetDownload size={17}/>Скачать фото</button>}
+                  <button onClick={clearChat} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}><IcTrash size={17}/>Очистить чат</button>
+                  <button onClick={toggleBlock} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:"#FF3B30",fontSize:14}}><IcSetLock size={17} color="#FF3B30"/>{blocked?"Разблокировать":"Заблокировать"}</button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
-        <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
+        <div style={{position:"relative",zIndex:2,display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
           <button onClick={()=>profileStories.length&&setProfileViewer({items:profileStories,startIndex:0})} style={{position:"relative",background:"transparent",border:"none",padding:0,cursor:profileStories.length?"pointer":"default",fontFamily:"inherit"}}>
             <div style={{width:116,height:116,borderRadius:"50%",padding:profileStories.length?3:0,background:profileStories.length?`linear-gradient(135deg,${profileAccent},${accent2})`:"transparent"}}>
               <Avatar name={user.name||"?"} photo={user.photo} size={116}/>
             </div>
-            {profileStories.length>0&&<div style={{position:"absolute",right:4,bottom:5,width:26,height:26,borderRadius:"50%",background:accent,color:"#fff",border:`3px solid #050505`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,fontSize:16}}>+</div>}
+            {profileStories.length>0&&<div style={{position:"absolute",right:4,bottom:5,width:26,height:26,borderRadius:"50%",background:accent,color:"#fff",border:`3px solid #050505`,display:"flex",alignItems:"center",justifyContent:"center"}}><IcAddCircle size={16} color="#fff"/></div>}
           </button>
-          <div style={{color:"#fff",fontWeight:1000,fontSize:30,lineHeight:1.08,marginTop:18,letterSpacing:0}}>{user.name}</div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginTop:18}}>
+            <div style={{color:"#fff",fontWeight:1000,fontSize:30,lineHeight:1.08,letterSpacing:0}}>{user.name}</div>
+          </div>
           <div style={{color:profileAccent,fontSize:18,fontWeight:800,marginTop:7}}>@{user.tag}</div>
           <div style={{color:"rgba(255,255,255,.55)",fontSize:15,marginTop:8,lineHeight:1.35}}>{user.bio||"Анонимный пользователь"}</div>
-        </div>
-      </div>
 
-      {/* Cover photo */}
-      <div style={{display:"none",position:"relative",flexShrink:0,height:"clamp(260px,50vw,360px)",overflow:"hidden"}}>
-        {hasPhoto
-          ? <img src={user.photo} alt={user.name}
-              style={{width:"100%",height:"100%",objectFit:"cover",display:"block",
-                opacity:imgVisible?1:0,transition:"opacity 0.4s ease",filter:"blur(0px)"}}
-              onLoad={()=>setImgVisible(true)}/>
-          : <div style={{width:"100%",height:"100%",
-              background:`linear-gradient(160deg,${color}CC,${color}33)`}}/>
-        }
-        {/* Gradient overlay */}
-        <div style={{position:"absolute",inset:0,
-          background:`radial-gradient(circle at 30% 18%,${alphaColor(profileAccent,.55)} 0%,transparent 38%),linear-gradient(to bottom,rgba(0,0,0,0.16) 0%,transparent 42%,rgba(0,0,0,0.84) 100%)`}}/>
-
-        {/* Back button */}
-        <button onClick={onClose} style={{position:"absolute",
-          top:"max(env(safe-area-inset-top,28px),28px)",left:12,
-          width:36,height:36,borderRadius:"50%",
-          background:"rgba(0,0,0,0.45)",border:"none",color:"#fff",
-          fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",
-          justifyContent:"center",backdropFilter:"blur(12px)",
-          WebkitBackdropFilter:"blur(12px)",transition:"all 0.2s"}}>←</button>
-
-        {/* 3-dot menu */}
-        {uid!==myUid&&(
-          <div style={{position:"absolute",top:"max(env(safe-area-inset-top,28px),28px)",right:12}}>
-            <button onClick={()=>setShowMenu(m=>!m)} style={{width:36,height:36,borderRadius:"50%",
-              background:"rgba(0,0,0,0.45)",border:"none",color:"#fff",
-              fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",
-              justifyContent:"center",backdropFilter:"blur(12px)",WebkitBackdropFilter:"blur(12px)"}}>⋮</button>
-            {showMenu&&(
-              <div style={{position:"absolute",top:44,right:0,background:surface,
-                border:`1px solid ${border}`,borderRadius:14,minWidth:180,
-                boxShadow:"0 8px 30px rgba(0,0,0,0.6)",zIndex:10,
-                animation:"popIn 0.2s cubic-bezier(0.34,1.56,0.64,1)"}}
-                onClick={e=>e.stopPropagation()}>
-                {hasPhoto&&(
-                  <button onClick={downloadAvatar} style={{width:"100%",display:"flex",alignItems:"center",gap:10,
-                    padding:"12px 16px",background:"none",border:"none",cursor:"pointer",
-                    fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}>
-                    📥 Скачать фото
-                  </button>
-                )}
-                <button onClick={clearChat} style={{width:"100%",display:"flex",alignItems:"center",gap:10,
-                  padding:"12px 16px",background:"none",border:"none",cursor:"pointer",
-                  fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}>
-                  🗑 Очистить чат
-                </button>
-                <button onClick={toggleBlock} style={{width:"100%",display:"flex",alignItems:"center",gap:10,
-                  padding:"12px 16px",background:"none",border:"none",cursor:"pointer",
-                  fontFamily:"inherit",color:"#FF3B30",fontSize:14}}>
-                  {blocked?"🔓 Разблокировать":"🚫 Заблокировать"}
-                </button>
-              </div>
-            )}
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,marginTop:14}}>
+            <div style={{color:"rgba(255,255,255,.75)",fontSize:14,fontWeight:700}}>{fmtListenTime(user.totalListenSec)} прослушано</div>
           </div>
-        )}
 
-        {/* Name overlay */}
-        <div style={{position:"absolute",bottom:16,left:16,right:16}}>
-          <div style={{color:"#fff",fontWeight:800,fontSize:24,
-            textShadow:"0 1px 8px rgba(0,0,0,0.7)",marginBottom:4,
-            animation:"fadeUp 0.4s ease 0.15s both"}}>{user.name}</div>
-          <div style={{color:"rgba(255,255,255,0.7)",fontSize:14,
-            animation:"fadeUp 0.4s ease 0.25s both"}}>@{user.tag}</div>
-          {user.lastSeen&&(
-            <div style={{color:"rgba(255,255,255,0.45)",fontSize:12,marginTop:3,
-              animation:"fadeUp 0.4s ease 0.3s both"}}>
-              был(а) {typeof user.lastSeen==="object"
-                ?new Date(user.lastSeen.seconds*1000).toLocaleTimeString("ru",{hour:"2-digit",minute:"2-digit"})
-                :user.lastSeen}
+          {equippedAchievements.length>0&&(
+            <div style={{display:"flex",flexWrap:"wrap",justifyContent:"center",gap:8,marginTop:16}}>
+              {equippedAchievements.map(a=>(
+                <div key={a.id} style={{padding:"9px 16px",borderRadius:20,
+                  background:a.exclusive?"linear-gradient(110deg,#050505 0%,#343434 34%,#050505 52%,#555 72%,#050505 100%)":(a.rainbow?"linear-gradient(110deg,#ff375f,#ff9f0a,#34c759,#0a84ff,#bf5af2)":alphaColor(a.color,.28)),
+                  backgroundSize:(a.exclusive||a.rainbow)?"220% 100%":undefined,animation:(a.exclusive||a.rainbow)?"creatorSheen 3.5s linear infinite":undefined,
+                  border:a.exclusive?"1px solid rgba(255,255,255,.52)":("1px solid "+alphaColor(a.color,.72)),color:"#fff",fontSize:13,fontWeight:700,
+                  boxShadow:a.exclusive?"0 0 14px rgba(255,255,255,.2),inset 0 1px rgba(255,255,255,.16)":("0 0 12px "+alphaColor(a.color,.22))}}>{a.title}</div>
+              ))}
             </div>
           )}
         </div>
@@ -4395,6 +4633,32 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
 
       {/* Content */}
       <div style={{padding:"14px 14px max(env(safe-area-inset-bottom,18px),18px)"}} onClick={()=>setShowMenu(false)}>
+        {isMe&&(
+          <div style={{background:profileSurface,borderRadius:16,padding:"14px",marginBottom:12,animation:"fadeUp 0.4s ease 0.06s both"}}>
+            <div style={{color:text2,fontSize:11,fontWeight:800,letterSpacing:.8,marginBottom:12}}>ДАННЫЕ ПРОФИЛЯ</div>
+            {profileError&&<div style={{background:"rgba(229,57,53,.14)",border:"1px solid rgba(229,57,53,.46)",borderRadius:10,padding:"9px 11px",color:"#ff6b6b",fontSize:13,marginBottom:12}}>{profileError}</div>}
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div>
+                <label style={{display:"block",color:text2,fontSize:11,fontWeight:700,marginBottom:5}}>ИМЯ</label>
+                <input value={draftName} maxLength={64} onChange={e=>{setDraftName(e.target.value);setProfileError("");}} style={{width:"100%",boxSizing:"border-box",background:surface2,border:`1px solid ${border}`,borderRadius:10,padding:"11px 12px",color:text,fontSize:15,outline:"none",fontFamily:"inherit"}}/>
+              </div>
+              <div>
+                <label style={{display:"block",color:text2,fontSize:11,fontWeight:700,marginBottom:5}}>ЮЗЕРНЕЙМ</label>
+                <div style={{display:"flex",alignItems:"center",background:surface2,border:`1px solid ${border}`,borderRadius:10,overflow:"hidden"}}>
+                  <span style={{color:profileAccent,padding:"0 10px 0 12px",fontSize:16,fontWeight:800}}>@</span>
+                  <input value={draftTag} maxLength={32} onChange={e=>{setDraftTag(e.target.value.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase());setProfileError("");}} style={{flex:1,minWidth:0,background:"transparent",border:"none",padding:"11px 12px 11px 0",color:text,fontSize:15,outline:"none",fontFamily:"inherit"}}/>
+                </div>
+              </div>
+              <div>
+                <label style={{display:"block",color:text2,fontSize:11,fontWeight:700,marginBottom:5}}>О СЕБЕ</label>
+                <textarea value={draftBio} maxLength={240} rows={3} onChange={e=>{setDraftBio(e.target.value);setProfileError("");}} style={{width:"100%",boxSizing:"border-box",background:surface2,border:`1px solid ${border}`,borderRadius:10,padding:"11px 12px",color:text,fontSize:14,outline:"none",fontFamily:"inherit",resize:"none"}}/>
+              </div>
+              <button onClick={saveProfileDetails} disabled={profileSaving} style={{minHeight:44,display:"flex",alignItems:"center",justifyContent:"center",gap:8,background:profileSaving?surface2:`linear-gradient(135deg,${profileAccent},${accent2})`,border:"none",borderRadius:10,color:"#fff",fontSize:14,fontWeight:800,cursor:profileSaving?"default":"pointer",fontFamily:"inherit",opacity:profileSaving?0.72:1}}>
+                <IcCheckOne size={17} color="#fff"/>{profileSaving?"Сохраняю...":"Сохранить"}
+              </button>
+            </div>
+          </div>
+        )}
         {profileStories.length>0&&(
           <div style={{background:profileSurface,borderRadius:16,padding:"12px 14px",marginBottom:12,animation:"fadeUp 0.4s ease 0.08s both"}}>
             <div style={{color:text2,fontSize:11,fontWeight:800,letterSpacing:.8,marginBottom:10}}>Истории</div>
@@ -4409,6 +4673,90 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
             </button>
           </div>
         )}
+
+        {user.pinnedTrack&&(
+          <div style={{background:profileSurface,borderRadius:16,padding:"12px 14px",marginBottom:12,animation:"fadeUp 0.4s ease 0.09s both"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,color:text2,fontSize:11,fontWeight:800,letterSpacing:.8}}>
+                <IcPin size={13} color={text2}/>ЗАКРЕПЛЁННЫЙ ТРЕК
+              </div>
+              {isMe&&<button onClick={unpinTrack} style={{background:"none",border:"none",color:profileAccent,fontSize:12.5,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Открепить</button>}
+            </div>
+            <button onClick={()=>pinnedIsPlaying?audio.pause():audio.playTrack(user.pinnedTrack)}
+              style={{display:"flex",alignItems:"center",gap:12,width:"100%",background:"transparent",border:"none",padding:0,cursor:"pointer",fontFamily:"inherit",textAlign:"left",WebkitTapHighlightColor:"transparent",transition:"transform 0.15s"}}
+              onMouseDown={e=>e.currentTarget.style.transform="scale(0.98)"}
+              onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}
+              onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}
+              onTouchStart={e=>e.currentTarget.style.transform="scale(0.98)"}
+              onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}>
+              <div style={{width:52,height:52,borderRadius:12,background:`linear-gradient(135deg,${profileAccent}88,${accent2}66)`,display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",flexShrink:0}}>
+                {user.pinnedTrack.coverUrl?<img src={user.pinnedTrack.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<IcMusicNote size={22} color="#fff"/>}
+              </div>
+              <div style={{minWidth:0,flex:1}}>
+                <div style={{color:text,fontWeight:800,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user.pinnedTrack.name||"Трек"}</div>
+                <div style={{color:text2,fontSize:12,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user.pinnedTrack.author||""}</div>
+              </div>
+              <div style={{width:36,height:36,borderRadius:"50%",background:pinnedIsPlaying?profileAccent:surface2,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"background 0.2s"}}>
+                {pinnedIsPlaying?<IcAudioPause size={16} color={contrastOn(profileAccent)}/>:<IcAudioPlay size={16}/>}
+              </div>
+            </button>
+          </div>
+        )}
+
+        <div style={{background:profileSurface,borderRadius:16,padding:"14px 16px",marginBottom:12,animation:"fadeUp 0.4s ease 0.11s both"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,color:text,fontWeight:900,fontSize:16}}><IcTrophy size={18} color={profileAccent}/>Достижения</div>
+            <div style={{color:text2,fontSize:12,fontWeight:700}}>Открыто {unlockedAchievements.length} из {ACHIEVEMENTS.length}</div>
+          </div>
+          {achPageCount>1&&(
+            <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
+              <button onClick={()=>setAchPage(p=>Math.max(0,p-1))} disabled={achPage===0} style={{background:"none",border:"none",cursor:achPage===0?"default":"pointer",opacity:achPage===0?0.3:1,display:"flex",alignItems:"center",justifyContent:"center",width:28,height:28}}><IcChevronDown size={18} color={text2} style={{transform:"rotate(90deg)"}}/></button>
+              <div style={{color:text2,fontSize:11,fontWeight:700}}>{achPage+1} / {achPageCount}</div>
+              <button onClick={()=>setAchPage(p=>Math.min(achPageCount-1,p+1))} disabled={achPage===achPageCount-1} style={{background:"none",border:"none",cursor:achPage===achPageCount-1?"default":"pointer",opacity:achPage===achPageCount-1?0.3:1,display:"flex",alignItems:"center",justifyContent:"center",width:28,height:28}}><IcChevronDown size={18} color={text2} style={{transform:"rotate(-90deg)"}}/></button>
+            </div>
+          )}
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {pagedAchievements.map(a=>{
+              const done=a.unlocked(user);
+              const frac=a.progress(user);
+              const equipped=(user.equippedIds||[]).includes(a.id);
+              const exclusive=done&&(a.exclusive||a.rainbow);
+              return(
+                <div key={a.id} style={{background:exclusive?"linear-gradient(110deg,#050505 0%,#2d2d2d 34%,#050505 52%,#454545 72%,#050505 100%)":(done?surface2:"transparent"),backgroundSize:exclusive?"220% 100%":undefined,animation:exclusive?"creatorSheen 3.5s linear infinite":undefined,border:`1px solid ${exclusive?"rgba(255,255,255,.48)":(done?border:"transparent")}`,borderRadius:14,padding:"12px 14px",opacity:done?1:0.75,boxShadow:exclusive?"0 0 18px rgba(255,255,255,.16),inset 0 1px rgba(255,255,255,.13)":undefined}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+                    <div style={{width:40,height:40,borderRadius:"50%",background:exclusive?"linear-gradient(135deg,#080808,#666,#080808)":(done?`linear-gradient(135deg,${profileAccent},${accent2})`:surface2),border:exclusive?"1px solid rgba(255,255,255,.52)":"none",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      {done?<IcStar size={18} color="#fff"/>:<IcSetLock size={16} color={text2}/>}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                        <div style={{color:done?text:text2,fontWeight:800,fontSize:14}}>{a.title}</div>
+                        <div style={{color:text2,fontSize:10,fontWeight:800,letterSpacing:.6,whiteSpace:"nowrap"}}>{a.tier}</div>
+                      </div>
+                      <div style={{color:text2,fontSize:12.5,marginTop:3}}>{a.desc}</div>
+                      {!done&&(
+                        <div style={{marginTop:8}}>
+                          <div style={{height:5,borderRadius:3,background:border,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:(frac*100)+"%",borderRadius:3,background:profileAccent}}/>
+                          </div>
+                          <div style={{textAlign:"right",color:text2,fontSize:11,marginTop:4}}>{a.progressLabel(user)}</div>
+                        </div>
+                      )}
+                      {done&&isMe&&(
+                        <button onClick={()=>toggleEquip(a.id)} style={{marginTop:6,background:"none",border:"none",padding:0,cursor:"pointer",fontFamily:"inherit",
+                          color:equipped?"#4CAF50":profileAccent,fontSize:12,fontWeight:700,display:"flex",alignItems:"center",gap:5}}>
+                          {equipped?<><IcCheckOne size={13} color="#4CAF50"/>Надето — снять</>:"Надеть"}
+                        </button>
+                      )}
+                      {done&&!isMe&&<div style={{color:"#4CAF50",fontSize:12,fontWeight:700,marginTop:4,display:"flex",alignItems:"center",gap:5}}><IcCheckOne size={13} color="#4CAF50"/>Получено</div>}
+                    </div>
+                  </div>
+                </div>
+              );
+
+            })}
+          </div>
+        </div>
+
         {user.bio&&(
           <div style={{background:profileSurface,borderRadius:16,padding:"12px 16px",marginBottom:12,
             animation:"fadeUp 0.4s ease 0.1s both"}}>
@@ -4437,8 +4785,8 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
             </div>
           </div>
           <div style={{display:"flex",gap:10}}>
-            <button onClick={()=>navigator.clipboard?.writeText(profileLink).catch(()=>{})} style={{flex:1,padding:"12px 10px",borderRadius:14,border:`1px solid ${border}`,background:surface2,color:text,fontWeight:800,fontFamily:"inherit"}}>Копировать</button>
-            <button onClick={()=>{if(navigator.share)navigator.share({title:user.name,text:user.name,url:profileLink}).catch(()=>{});else navigator.clipboard?.writeText(profileLink).catch(()=>{});}} style={{flex:1,padding:"12px 10px",borderRadius:14,border:"none",background:`linear-gradient(135deg,${profileAccent},${accent2})`,color:"#fff",fontWeight:900,fontFamily:"inherit"}}>Поделиться</button>
+            <button onClick={()=>navigator.clipboard?.writeText(profileLink).catch(()=>{})} style={{flex:1,padding:"12px 10px",borderRadius:14,border:`1px solid ${border}`,background:surface2,color:text,fontWeight:800,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><IcCopy size={16} color={text}/>Копировать</button>
+            <button onClick={()=>{if(navigator.share)navigator.share({title:user.name,text:user.name,url:profileLink}).catch(()=>{});else navigator.clipboard?.writeText(profileLink).catch(()=>{});}} style={{flex:1,padding:"12px 10px",borderRadius:14,border:"none",background:`linear-gradient(135deg,${profileAccent},${accent2})`,color:"#fff",fontWeight:900,fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",gap:8}}><IcShareOut size={16} color="#fff"/>Поделиться</button>
           </div>
         </div>
 
@@ -4454,7 +4802,7 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
               onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}
               onTouchStart={e=>e.currentTarget.style.transform="scale(0.97)"}
               onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}>
-              💬 Написать сообщение
+              <IcSend size={17} color="#fff"/>Написать сообщение
             </button>
             <button onClick={addProfileContact} disabled={contactAdded}
               style={{padding:"14px",background:contactAdded?surface2:"transparent",
@@ -4462,7 +4810,7 @@ function ProfileView({uid,myUid,onClose,onStartChat}){
                 color:contactAdded?text2:profileAccent,fontSize:15,fontWeight:800,
                 cursor:contactAdded?"default":"pointer",fontFamily:"inherit",
                 display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
-              {contactAdded?"В контактах":"Добавить в контакты"}
+              {contactAdded?<><IcCheckOne size={16} color={text2}/>В контактах</>:"Добавить в контакты"}
             </button>
           </div>
         )}
@@ -4666,6 +5014,7 @@ function CreateModal({type,currentUser,profile,onClose,onCreated}){
     if(!chatName.trim())return;setLoading(true);
     try{const tag2=chatName.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/gi,"")+Math.floor(100+Math.random()*900);
       const r=await addDoc(collection(db,"chats"),{type,name:chatName.trim(),desc,tag:tag2,members:[currentUser.uid],creatorUid:currentUser.uid,creatorName:profile.name,created:serverTimestamp(),lastMsg:"",lastTime:"",photo:photo||null,inviteLink:`https://redmrxgram.app/${type}/${tag2}`});
+      if(type==="group")updateDoc(doc(db,"users",currentUser.uid),{hasCreatedGroup:true}).catch(()=>{});
       onCreated({id:r.id,type,name:chatName.trim(),desc,tag:tag2,photo:photo||null,creatorUid:currentUser.uid,members:[currentUser.uid]});}
     catch(e){alert("Ошибка: "+e.message);}
     setLoading(false);
@@ -4697,6 +5046,7 @@ function CreateModal({type,currentUser,profile,onClose,onCreated}){
 // ─── Splash Screen ──────────────────────────────────────────────────────────
 function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
   const {surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
+  const[closing,setClosing]=useState(false);
   const isChannel=chat?.type==="channel";
   const[title,setTitle]=useState(chat?.name||chat?.title||"");
   const[desc,setDesc]=useState(chat?.desc||"");
@@ -4715,6 +5065,18 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
   const cleanTag=tag.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase();
   const inviteLink=`https://redmrxgram.app/${isChannel?"channel":"group"}/${cleanTag||chat?.id}`;
   const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
+  const requestClose=useCallback(()=>{
+    if(closing)return;
+    setClosing(true);
+  },[closing]);
+  const finishClose=useCallback(e=>{
+    if(closing&&e.animationName==="chatSlideOut")onClose?.();
+  },[closing,onClose]);
+  useEffect(()=>{
+    const closeFromSystemBack=()=>requestClose();
+    window.addEventListener("rmg-chat-modal-close",closeFromSystemBack);
+    return()=>window.removeEventListener("rmg-chat-modal-close",closeFromSystemBack);
+  },[requestClose]);
   const patchSetting=(key)=>setSettings(s=>({...s,[key]:!s[key]}));
   const pickPhoto=async(e)=>{
     const file=e.target.files?.[0];e.target.value="";
@@ -4745,7 +5107,7 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
       await updateDoc(doc(db,"chats",chat.id),patch);
       onSaved?.(patch);
       setStatus("Сохранено");
-      setTimeout(onClose,350);
+      setTimeout(requestClose,350);
     }catch(err){setStatus("Не удалось сохранить настройки");}
     finally{setBusy(false);}
   };
@@ -4760,10 +5122,10 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
     </button>
   );
   return createPortal(
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.72)",zIndex:800,display:"flex",alignItems:"flex-end"}} onClick={onClose}>
-      <div style={{width:"100%",maxHeight:"92vh",overflowY:"auto",background:surface,borderRadius:"24px 24px 0 0",boxShadow:"0 -18px 50px rgba(0,0,0,0.55)"}} onClick={e=>e.stopPropagation()}>
+    <div onAnimationEnd={finishClose} style={{position:"fixed",inset:0,zIndex:800,background:surface,overflowY:"auto",overflowX:"hidden",willChange:"transform",animation:closing?"chatSlideOut .48s cubic-bezier(0.32,0.72,0,1) forwards":"chatSlideIn .32s cubic-bezier(0.32,0.72,0,1) both",WebkitAnimation:closing?"chatSlideOut .48s cubic-bezier(0.32,0.72,0,1) forwards":"chatSlideIn .32s cubic-bezier(0.32,0.72,0,1) both"}}>
+      <div style={{minHeight:"100%",background:surface}}>
         <div style={{position:"sticky",top:0,zIndex:2,background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:10,padding:"14px 16px"}}>
-          <button onClick={onClose} style={{width:38,height:38,borderRadius:"50%",border:`1px solid ${border}`,background:surface2,color:text,fontSize:20,cursor:"pointer"}}>←</button>
+          <button onClick={requestClose} style={{width:38,height:38,borderRadius:"50%",border:`1px solid ${border}`,background:surface2,color:text,fontSize:20,cursor:"pointer"}}>←</button>
           <div style={{flex:1}}>
             <div style={{color:text,fontWeight:900,fontSize:17}}>{isChannel?"Настройки канала":"Настройки группы"}</div>
             <div style={{color:text2,fontSize:12}}>{canManage?"Редактирование и ссылка приглашения":"Только просмотр"}</div>
@@ -4813,6 +5175,8 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
 
 function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
+  const[closing,setClosing]=useState(false);
+  const[closeToSettings,setCloseToSettings]=useState(false);
   const isChannel=chat?.type==="channel";
   const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
   const[qrDataUrl,setQrDataUrl]=useState("");
@@ -4828,6 +5192,27 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
     }).then(setQrDataUrl).catch(()=>setQrDataUrl(""));
   },[inviteLink]);
 
+  const requestClose=useCallback(()=>{
+    if(closing)return;
+    setClosing(true);
+  },[closing]);
+  useEffect(()=>{
+    const closeFromSystemBack=()=>requestClose();
+    window.addEventListener("rmg-chat-modal-close",closeFromSystemBack);
+    return()=>window.removeEventListener("rmg-chat-modal-close",closeFromSystemBack);
+  },[requestClose]);
+
+  const requestOpenSettings=useCallback(()=>{
+    if(closing)return;
+    setCloseToSettings(true);
+    setClosing(true);
+  },[closing]);
+  const finishClose=useCallback(e=>{
+    if(!closing||e.animationName!=="chatSlideOut")return;
+    onClose?.();
+    if(closeToSettings)onOpenSettings?.();
+  },[closing,closeToSettings,onClose,onOpenSettings]);
+
   const copyLink=async()=>{
     try{await navigator.clipboard.writeText(inviteLink);}catch{}
   };
@@ -4839,12 +5224,12 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
   };
 
   return createPortal(
-    <div style={{position:"fixed",inset:0,zIndex:790,background:`linear-gradient(180deg,${alphaColor(tone,.22)} 0%,#050505 300px,${bg||"#050505"} 100%)`,overflowY:"auto",overflowX:"hidden"}} onClick={()=>{}}>
+    <div onAnimationEnd={finishClose} style={{position:"fixed",inset:0,zIndex:790,background:`linear-gradient(180deg,${alphaColor(tone,.22)} 0%,#050505 300px,${bg||"#050505"} 100%)`,overflowY:"auto",overflowX:"hidden",willChange:"transform",animation:closing?"chatSlideOut .48s cubic-bezier(0.32,0.72,0,1) forwards":"chatSlideIn .32s cubic-bezier(0.32,0.72,0,1) both",WebkitAnimation:closing?"chatSlideOut .48s cubic-bezier(0.32,0.72,0,1) forwards":"chatSlideIn .32s cubic-bezier(0.32,0.72,0,1) both"}} onClick={e=>e.stopPropagation()}>
       <div style={{position:"relative",padding:"max(env(safe-area-inset-top,24px),24px) 18px 20px",background:`radial-gradient(circle at 50% -10%,${alphaColor(tone,.42)} 0%,transparent 48%),linear-gradient(180deg,${alphaColor(tone,.16)} 0%,rgba(0,0,0,.78) 72%,#050505 100%),#050505`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
-          <button onClick={onClose} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>←</button>
+          <button onClick={requestClose} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>←</button>
           <div style={{color:"#fff",fontWeight:900,fontSize:23,letterSpacing:0}}>{isChannel?"Канал":"Группа"}</div>
-          <button onClick={canManage?onOpenSettings:shareLink} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>{canManage?"⚙":"↗"}</button>
+          <button onClick={canManage?requestOpenSettings:shareLink} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>{canManage?"⚙":"↗"}</button>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
           <div style={{width:116,height:116,borderRadius:"50%",boxShadow:`0 18px 55px ${alphaColor(tone,.24)}`}}>
@@ -4886,7 +5271,7 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
         </div>
 
         {canManage&&(
-          <button onClick={onOpenSettings} style={{width:"100%",padding:"14px",border:"none",borderRadius:16,background:`linear-gradient(135deg,${tone},${accent2})`,color:"#fff",fontWeight:900,fontSize:15,fontFamily:"inherit",boxShadow:`0 4px 16px ${alphaColor(tone,.28)}`}}>Настройки и аватарка</button>
+          <button onClick={requestOpenSettings} style={{width:"100%",padding:"14px",border:"none",borderRadius:16,background:`linear-gradient(135deg,${tone},${accent2})`,color:"#fff",fontWeight:900,fontSize:15,fontFamily:"inherit",boxShadow:`0 4px 16px ${alphaColor(tone,.28)}`}}>Настройки и аватарка</button>
         )}
       </div>
     </div>,
@@ -5886,6 +6271,8 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
         {msg.text}
       </div>
     );
+    const mineFg=fromMe?contrastOn(accent):text;
+    const mineSoft=(a)=>mineFg==="#000"?`rgba(0,0,0,${a})`:`rgba(255,255,255,${a})`;
     const bubbleStyle={
       background:fromMe?`linear-gradient(135deg,${accent},${accent2})`:surface2,
       borderRadius:fromMe?"20px 20px 4px 20px":"20px 20px 20px 4px",
@@ -5894,14 +6281,14 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
       padding:msg.type==="video"?"3px"
         :msg.type==="voice"||msg.type==="file"?"10px 12px"
         :"9px 13px",
-      color:text,fontSize:msgFontSize||14,lineHeight:1.55,
+      color:mineFg,fontSize:msgFontSize||14,lineHeight:1.55,
       boxShadow:fromMe?`0 3px 14px ${accent}40`:"0 1px 5px rgba(0,0,0,0.18)",
       wordBreak:"break-word",maxWidth:"100%",
     };
     return(
       <div style={bubbleStyle} onTouchStart={onPStart} onTouchMove={onPMove} onTouchEnd={onPEnd} onMouseDown={onPStart} onMouseUp={onPEnd}>
         {msg.forwarded&&(
-          <div style={{fontSize:11,fontWeight:700,color:fromMe?"rgba(255,255,255,0.65)":accent,marginBottom:4,display:"flex",alignItems:"center",gap:4}}>
+          <div style={{fontSize:11,fontWeight:700,color:fromMe?mineSoft(0.65):accent,marginBottom:4,display:"flex",alignItems:"center",gap:4}}>
             ↪️ Переслано
           </div>
         )}
@@ -5910,7 +6297,7 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
           <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:4}}>
             {[...new Set(Object.values(msg.reactions))].map(r=>{
               const cnt=Object.values(msg.reactions).filter(x=>x===r).length;
-              return <span key={r} style={{background:"rgba(255,255,255,0.15)",borderRadius:10,padding:"1px 6px",fontSize:12}}>{r}{cnt>1&&<span style={{fontSize:10,marginLeft:2}}>{cnt}</span>}</span>;
+              return <span key={r} style={{background:fromMe?mineSoft(0.15):"rgba(255,255,255,0.15)",borderRadius:10,padding:"1px 6px",fontSize:12}}>{r}{cnt>1&&<span style={{fontSize:10,marginLeft:2}}>{cnt}</span>}</span>;
             })}
           </div>
         )}
@@ -6665,10 +7052,45 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
 
 // ─── Find People ──────────────────────────────────────────────────────────────
 // AudioFullPlayerOverlay — renders full-screen player at App root level
-function AudioFullPlayerOverlay(){
+function AudioFullPlayerOverlay({currentUser}){
   const audio=useContext(AudioCtx);
   if(!audio||!audio.showFullPlayer||!audio.track)return null;
-  return <AudioPlayerScreen/>;
+  return <AudioPlayerScreen currentUser={currentUser}/>;
+}
+
+// Копит реальное время прослушивания (тикает раз в секунду, только пока играет)
+// и периодически шлёт дельту на сервер через increment() — атомарно, без гонок
+// между несколькими устройствами одного аккаунта. Рендерится один раз в корне.
+function ListenTimeTracker({uid}){
+  const audio=useContext(AudioCtx);
+  const pendingRef=useRef(0);
+  const uidRef=useRef(uid);
+  uidRef.current=uid;
+
+  const flush=useCallback(()=>{
+    const sec=Math.floor(pendingRef.current);
+    if(sec<=0||!uidRef.current)return;
+    pendingRef.current-=sec;
+    updateDoc(doc(db,"users",uidRef.current),{totalListenSec:increment(sec)}).catch(()=>{
+      pendingRef.current+=sec; // не ушло — вернём в копилку, попробуем на следующем тике
+    });
+  },[]);
+
+  useEffect(()=>{
+    if(!audio?.playing||!uid)return;
+    const tick=setInterval(()=>{pendingRef.current+=1;},1000);
+    const flushTimer=setInterval(flush,20000);
+    return()=>{clearInterval(tick);clearInterval(flushTimer);flush();};
+  },[audio?.playing,uid,flush]);
+
+  useEffect(()=>{
+    const onHide=()=>flush();
+    document.addEventListener("visibilitychange",onHide);
+    window.addEventListener("beforeunload",onHide);
+    return()=>{document.removeEventListener("visibilitychange",onHide);window.removeEventListener("beforeunload",onHide);flush();};
+  },[flush]);
+
+  return null;
 }
 
 // AudioMiniBar — renders MiniPlayer inline in screen layouts (below headers)
@@ -6891,34 +7313,55 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
 }
 
 // ─── Full Audio Player Screen ────────────────────────────────────────────────
-function AudioPlayerScreen(){
+function AudioPlayerScreen({currentUser}){
   const {surface,surface2,border,text,text2,accent,accent2,bg}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
   const [visible,setVisible]=useState(false);
   const [dragging,setDragging]=useState(false);
-  const [showQueue,setShowQueue]=useState(false);
-  const [queueClosing,setQueueClosing]=useState(false);
-  const toggleQueue=()=>{
-    if(showQueue){
-      setQueueClosing(true);
-      setTimeout(()=>{setShowQueue(false);setQueueClosing(false);},260);
-    }else{
-      setShowQueue(true);
-    }
-  };
+  const [activeTab,setActiveTab]=useState("player"); // "player" | "queue"
+  const [showSpeedPopup,setShowSpeedPopup]=useState(false);
+  const [liked,setLiked]=useState(false);
   const [buffered,setBuffered]=useState(0);
+  const [pinnedId,setPinnedId]=useState(null);
+  const [pinBusy,setPinBusy]=useState(false);
   const seekBarRef=useRef(null);
 
   useEffect(()=>{requestAnimationFrame(()=>setVisible(true));},[]);
 
-  // Отслеживаем буферизацию аудиоэлемента
   const trackId=audio?.track?.id;
+  useEffect(()=>{setLiked(false);setShowSpeedPopup(false);},[trackId]);
+
+  // Следим за закреплённым треком в профиле, чтобы кнопка "Закрепить"
+  // сразу показывала актуальное состояние (в т.ч. если открепили с экрана профиля).
+  useEffect(()=>{
+    if(!currentUser?.uid)return;
+    return onSnapshot(doc(db,"users",currentUser.uid),s=>{
+      setPinnedId(s.exists()?(s.data()?.pinnedTrack?.id||null):null);
+    },()=>{});
+  },[currentUser?.uid]);
+
+  const togglePin=async()=>{
+    if(!currentUser?.uid||!audio?.track||pinBusy)return;
+    setPinBusy(true);
+    try{
+      const t=audio.track;
+      if(pinnedId===t.id){
+        await setDoc(doc(db,"users",currentUser.uid),{pinnedTrack:null},{merge:true});
+      }else{
+        await setDoc(doc(db,"users",currentUser.uid),{pinnedTrack:{id:t.id,name:t.name||"",author:t.author||"",coverUrl:t.coverUrl||"",src:t.src||"",ext:t.ext||""}},{merge:true});
+      }
+    }catch(e){}
+    setPinBusy(false);
+  };
+
+  // Отслеживаем буферизацию аудиоэлемента
   useEffect(()=>{
     const update=()=>{
       const el=AUDIO_ENGINE.el;
       if(!el||!el.duration)return;
       let end=0;
       for(let i=0;i<el.buffered.length;i++){
+
         if(el.buffered.end(i)>end)end=el.buffered.end(i);
       }
       setBuffered(end/el.duration);
@@ -6962,13 +7405,14 @@ function AudioPlayerScreen(){
   useEffect(()=>{
     if(!audio?.showFullPlayer||!audio?.track)return;
     const closeByBack=()=>{
+      if(showSpeedPopup){setShowSpeedPopup(false);return true;}
       setVisible(false);
       setTimeout(()=>audio.closeFullPlayer(),300);
       return true;
     };
     _audioBackHandler=closeByBack;
     return()=>{if(_audioBackHandler===closeByBack)_audioBackHandler=null;};
-  },[audio?.showFullPlayer,audio?.track?.id,audio?.closeFullPlayer]);
+  },[audio?.showFullPlayer,audio?.track?.id,audio?.closeFullPlayer,showSpeedPopup]);
 
   if(!audio||!audio.track)return null;
   const {track,playing,progress,currentTime,duration,queue,idx,shuffle,repeat,speed}=audio;
@@ -7008,55 +7452,82 @@ function AudioPlayerScreen(){
       display:"flex",flexDirection:"column",
       overflow:"hidden",
     }}>
-      {/* Tinted background gradient from accent */}
-      <div style={{position:"absolute",inset:0,
-        background:`radial-gradient(ellipse at 50% 20%,${accent}22 0%,transparent 65%)`,
-        pointerEvents:"none"}}/>
-
       {/* Header */}
       <div style={{
         display:"flex",alignItems:"center",justifyContent:"space-between",
         paddingTop:"max(env(safe-area-inset-top,28px),28px)",
-        paddingLeft:16,paddingRight:16,paddingBottom:10,
+        paddingLeft:16,paddingRight:16,paddingBottom:14,
         flexShrink:0,position:"relative",zIndex:1,
       }}>
-        <button className="rmg-audio-btn" onClick={close} style={{width:36,height:36,borderRadius:"50%",border:"none",cursor:"pointer",
+        <button className="rmg-audio-btn" onClick={close} style={{width:40,height:40,borderRadius:"50%",border:"none",cursor:"pointer",
           background:surface2,color:text,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <IcChevronDown size={22}/>
         </button>
-        <div style={{color:text,fontWeight:700,fontSize:15}}>Аудиоплеер</div>
-        <div style={{width:36}}/>
+        <div style={{display:"flex",alignItems:"center",gap:6,padding:"8px 16px",borderRadius:20,
+          background:surface2,color:text,fontSize:13,fontWeight:700}}>
+          <IcMusicNote size={15}/>
+          Плеер
+        </div>
+        <button className="rmg-audio-btn" onClick={()=>setShowSpeedPopup(v=>!v)} style={{width:40,height:40,borderRadius:"50%",border:"none",cursor:"pointer",
+          background:surface2,color:text,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <IcMoreH size={22}/>
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",padding:"0 24px",gap:28,flexShrink:0,position:"relative",zIndex:1}}>
+        {[["player","Плеер"],["queue",`Очередь${queue.length?" ("+queue.length+")":""}`]].map(([key,label])=>(
+          <button key={key} onClick={()=>setActiveTab(key)} style={{background:"none",border:"none",cursor:"pointer",
+            fontFamily:"inherit",padding:"0 0 10px",fontSize:15,fontWeight:700,
+            color:activeTab===key?text:text2}}>
+            {label}
+            <div style={{marginTop:8,height:3,borderRadius:2,background:activeTab===key?text:"transparent"}}/>
+          </button>
+        ))}
       </div>
 
       {/* Scrollable content */}
       <div style={{flex:1,overflowY:"auto",paddingBottom:"max(env(safe-area-inset-bottom,20px),20px)",position:"relative",zIndex:1}}>
-
+        {activeTab==="queue"?(
+          <div style={{padding:"12px 24px 0",animation:"rmgQueueOpen 0.32s cubic-bezier(.22,1,.36,1) both"}}>
+            <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
+          </div>
+        ):(<>
         {/* Artwork */}
-        <div style={{display:"flex",justifyContent:"center",padding:"16px 32px 24px"}}>
+        <div style={{display:"flex",justifyContent:"center",padding:"20px 32px 24px"}}>
           <div style={{
-            width:"min(240px,70vw)",height:"min(240px,70vw)",
-            borderRadius:24,
+            width:"min(320px,78vw)",height:"min(320px,78vw)",
+            borderRadius:20,
             background:`linear-gradient(135deg,${accent}88,${accent2}66)`,
             display:"flex",alignItems:"center",justifyContent:"center",
-            boxShadow:`0 20px 60px ${accent}44, 0 4px 20px rgba(0,0,0,0.5)`,
-            animation:playing?"artPulse 2s ease-in-out infinite":"none",
+            boxShadow:"0 20px 50px rgba(0,0,0,0.5)",
             overflow:"hidden",flexShrink:0,
           }}>
             {track.coverUrl
               ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              :<IcMusicNote size={72} color="#fff"/>}
+              :<IcMusicNote size={64} color="#fff"/>}
           </div>
         </div>
 
         {/* Track info */}
-        <div style={{padding:"0 24px",textAlign:"center",marginBottom:20}}>
-          <div style={{color:text,fontSize:19,fontWeight:800,marginBottom:5,
-            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-            {track.name||"Аудио"}
+        <div style={{padding:"0 24px",display:"flex",alignItems:"center",gap:12,marginBottom:22}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{color:text,fontSize:20,fontWeight:800,marginBottom:4,
+              overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {track.name||"Аудио"}
+            </div>
+            <div style={{color:text2,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+              {track.author||track.ext||"MP3"}{track.size?" · "+track.size:""}
+            </div>
           </div>
-          <div style={{color:text2,fontSize:13}}>
-            {track.ext||"MP3"}{track.size?" · "+track.size:""}{track.author?" · "+track.author:""}
-          </div>
+          <button className="rmg-audio-btn" style={{width:34,height:34,borderRadius:8,border:"none",cursor:"pointer",background:"none",
+            color:text2,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+            <IcDeviceSm size={19}/>
+          </button>
+          <button className={"rmg-audio-btn rmg-audio-toggle"+(liked?" on":"")} onClick={()=>setLiked(v=>!v)} style={{width:34,height:34,borderRadius:8,border:"none",cursor:"pointer",background:"none",
+            color:liked?accent:text2,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+            <IcHeart size={20}/>
+          </button>
         </div>
 
         {/* Seek bar */}
@@ -7074,19 +7545,18 @@ function AudioPlayerScreen(){
             {/* Buffered bar — реально загруженная часть трека */}
             <div style={{position:"absolute",left:0,top:0,height:"100%",
               width:(buffered*100)+"%",
-              background:accent+"33",
+              background:text2+"55",
               borderRadius:2,transition:"width 0.5s linear"}}/>
             {/* Playback progress bar */}
             <div style={{position:"absolute",left:0,top:0,height:"100%",
               width:(progress*100)+"%",
-              background:`linear-gradient(90deg,${accent},${accent2})`,
+              background:text,
               borderRadius:2}}/>
             {/* Thumb */}
             <div style={{position:"absolute",top:"50%",left:(progress*100)+"%",
               transform:"translate(-50%,-50%)",
               width:dragging?18:12,height:dragging?18:12,
-              borderRadius:"50%",background:accent,
-              boxShadow:`0 0 8px ${accent}88`,
+              borderRadius:"50%",background:text,
               transition:dragging?"none":"width 0.15s,height 0.15s",
               pointerEvents:"none"}}/>
           </div>
@@ -7098,75 +7568,82 @@ function AudioPlayerScreen(){
 
         {/* Main controls */}
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-evenly",
-          padding:"8px 16px 16px"}}>
+          padding:"8px 16px 20px"}}>
           <button className={"rmg-audio-btn rmg-audio-toggle"+(shuffle?" on":"")} onClick={()=>audio.setShuffle(!shuffle)}
-            style={{width:44,height:44,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:shuffle?accent+"22":"none",
-              color:shuffle?accent:text2,
+            style={{width:40,height:40,borderRadius:"50%",border:"none",cursor:"pointer",
+              background:"none",color:shuffle?accent:text2,
               display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioShuffle size={20}/></button>
           <button className="rmg-audio-btn" onClick={()=>audio.prev()}
-            style={{width:52,height:52,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:surface2,color:text,
-              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioPrev size={24}/></button>
+            style={{width:48,height:48,borderRadius:"50%",border:"none",cursor:"pointer",
+              background:"none",color:text,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioPrev size={28}/></button>
           <button className="rmg-audio-btn rmg-audio-btn-lg" onClick={()=>playing?audio.pause():audio.play()}
-            style={{width:68,height:68,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:`linear-gradient(135deg,${accent},${accent2})`,
-              color:"#fff",
+            style={{width:64,height:64,borderRadius:"50%",border:"none",cursor:"pointer",
+              background:text,color:bg,
               display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:`0 6px 24px ${accent}55`,
-              "--rmg-accent-a":`${accent}55`,"--rmg-accent-b":`${accent}55`,
+              boxShadow:"0 6px 20px rgba(0,0,0,0.35)",
+              "--rmg-accent-a":"rgba(0,0,0,0.35)","--rmg-accent-b":"rgba(0,0,0,0.35)",
               animation:playing?"rmgPlayPulse 1.8s ease-out infinite":"none"}}>
-            {playing?<IcAudioPause size={30}/>:<IcAudioPlay size={30}/>}
+            {playing?<IcAudioPause size={26}/>:<IcAudioPlay size={26}/>}
           </button>
           <button className="rmg-audio-btn" onClick={()=>audio.next()}
-            style={{width:52,height:52,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:surface2,color:text,
-              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioNext size={24}/></button>
+            style={{width:48,height:48,borderRadius:"50%",border:"none",cursor:"pointer",
+              background:"none",color:text,
+              display:"flex",alignItems:"center",justifyContent:"center"}}><IcAudioNext size={28}/></button>
           <button className={"rmg-audio-btn rmg-audio-toggle"+(repeatActive?" on":"")} onClick={nextRepeat}
-            style={{width:44,height:44,borderRadius:"50%",border:"none",cursor:"pointer",
-              background:repeatActive?accent+"22":"none",
-              color:repeatActive?accent:text2,
-              display:"flex",alignItems:"center",justifyContent:"center",
-              position:"relative"}}>
+            style={{width:40,height:40,borderRadius:"50%",border:"none",cursor:"pointer",
+              background:"none",color:repeatActive?accent:text2,
+              display:"flex",alignItems:"center",justifyContent:"center",position:"relative"}}>
             <IcAudioRepeat size={20}/>
             {repeat==="one"&&<span style={{position:"absolute",bottom:2,fontSize:8,color:accent,fontWeight:800}}>1</span>}
           </button>
         </div>
 
-        {/* Speed controls */}
-        <div style={{padding:"0 24px 16px"}}>
-          <div style={{color:text2,fontSize:11,fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:0.5}}>Скорость</div>
-          <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4}}>
-            {[0.5,0.75,1,1.25,1.5,1.75,2].map(s=>(
-              <button key={s} className="rmg-audio-btn" onClick={()=>audio.setSpeed(s)}
-                style={{flexShrink:0,padding:"6px 12px",borderRadius:20,border:`1.5px solid ${speed===s?accent:border}`,
-                  cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,
-                  background:speed===s?accent+"22":"none",
-                  color:speed===s?accent:text2,transition:"all 0.2s"}}>
-                {formatSpeed(s)}
-              </button>
-            ))}
+        {/* Bottom secondary actions */}
+        <div style={{display:"flex",justifyContent:"space-evenly",padding:"4px 16px 8px"}}>
+          {[
+            {icon:IcPin,label:pinnedId===trackId?"Открепить":"Закрепить",onClick:togglePin,disabled:pinBusy||!currentUser?.uid,active:pinnedId===trackId},
+            {icon:IcSpeedGauge,label:"Скорость",onClick:()=>setShowSpeedPopup(true),disabled:false,valueBadge:formatSpeed(speed)},
+            {icon:IcEqualizer,label:"Эквалайзер",onClick:()=>{},disabled:true},
+          ].map(({icon:Icon,label,onClick,disabled,valueBadge,active},i)=>(
+            <button key={i} className="rmg-audio-btn" onClick={disabled?undefined:onClick} style={{background:"none",border:"none",
+              cursor:disabled?"default":"pointer",fontFamily:"inherit",display:"flex",flexDirection:"column",
+              alignItems:"center",gap:6,opacity:disabled&&!active?0.4:1,padding:"4px 8px"}}>
+              <div style={{width:44,height:44,borderRadius:"50%",background:active?accent:surface2,
+                display:"flex",alignItems:"center",justifyContent:"center",position:"relative"}}>
+                <Icon size={19} color={active?bg:text}/>
+                {valueBadge&&<span style={{position:"absolute",bottom:-4,right:-4,background:accent,color:bg,
+                  fontSize:9,fontWeight:800,borderRadius:8,padding:"1px 4px"}}>{valueBadge}</span>}
+              </div>
+              <span style={{color:active?accent:text2,fontSize:11}}>{label}</span>
+            </button>
+          ))}
+        </div>
+        </>)}
+      </div>
+
+      {/* Speed popover */}
+      {showSpeedPopup&&(
+        <div onClick={()=>setShowSpeedPopup(false)} style={{position:"fixed",inset:0,zIndex:10,
+          background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"flex-end"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:surface,
+            borderRadius:"20px 20px 0 0",padding:"20px 20px max(env(safe-area-inset-bottom,20px),20px)",
+            animation:"rmgQueueOpen 0.28s cubic-bezier(.22,1,.36,1) both"}}>
+            <div style={{color:text,fontWeight:700,fontSize:15,marginBottom:14}}>Скорость воспроизведения</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {SPEEDS.map(s=>(
+                <button key={s} className="rmg-audio-btn" onClick={()=>{audio.setSpeed(s);setShowSpeedPopup(false);}}
+                  style={{padding:"8px 16px",borderRadius:20,border:`1.5px solid ${speed===s?accent:border}`,
+                    cursor:"pointer",fontFamily:"inherit",fontSize:14,fontWeight:700,
+                    background:speed===s?accent:"none",
+                    color:speed===s?bg:text2}}>
+                  {formatSpeed(s)}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
-
-        {/* Queue */}
-        <div style={{padding:"0 24px"}}>
-          <button className="rmg-audio-btn" onClick={toggleQueue}
-            style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",
-              padding:"12px 0",background:"none",border:"none",cursor:"pointer",
-              borderTop:`1px solid ${border}`,fontFamily:"inherit"}}>
-            <div style={{color:text,fontWeight:700,fontSize:14,display:"flex",alignItems:"center",gap:8}}>
-              <IcClipboard size={16} color={text}/> Очередь ({queue.length} {queue.length===1?"трек":queue.length<5?"трека":"треков"})
-            </div>
-            <div style={{color:text2,display:"flex",alignItems:"center",transform:showQueue&&!queueClosing?"rotate(180deg)":"none",transition:"transform 0.3s cubic-bezier(.34,1.56,.64,1)"}}><IcChevronDown size={16}/></div>
-          </button>
-          {(showQueue||queueClosing)&&(
-            <div style={{animation:queueClosing?"rmgQueueClose 0.26s cubic-bezier(.4,0,1,1) both":"rmgQueueOpen 0.32s cubic-bezier(.22,1,.36,1) both"}}>
-              <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
-            </div>
-          )}
-        </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -7249,9 +7726,24 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   useEffect(()=>{
     const vv=window.visualViewport;
     if(!vv)return;
+    let settleTimer;
+    let settleFrame=null;
+    const settleAtBottom=()=>{
+      // The native inset callback moves the composer and the flex layout at
+      // display cadence. Do not read dimensions or write scrollTop during that
+      // animation: either action can synchronously lay out a long message list
+      // and causes the tiny stutters visible on some Android WebViews.
+      //
+      // We only correct once after the viewport stops changing. Assigning a
+      // very large offset lets the browser clamp to the real bottom without a
+      // scrollHeight read, so this remains a cheap final correction.
+      settleFrame=requestAnimationFrame(()=>{
+        settleFrame=null;
+        const el=msgsRef.current;
+        if(el&&isNearBottomRef.current)el.scrollTop=1000000000;
+      });
+    };
     const onResize=()=>{
-      const el=msgsRef.current;
-      if(!el)return;
       // НЕ пересчитываем isNearBottomRef здесь — onScroll уже выставил его
       // корректно в момент когда пользователь реально прокручивал. После
       // открытия клавиатуры layout viewport уменьшается, что искусственно
@@ -7260,15 +7752,18 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       // Если пользователь был у низа — просто докручиваем до низа, чтобы
       // последнее сообщение оставалось видимым над клавиатурой.
       if(isNearBottomRef.current){
-        requestAnimationFrame(()=>{
-          el.style.scrollBehavior="smooth";
-          el.scrollTop=el.scrollHeight+99999;
-          setTimeout(()=>{if(el)el.style.scrollBehavior="auto";},260);
-        });
+        // visualViewport can fire for every IME animation frame. Debounce the
+        // final correction instead of interrupting native 60 fps movement.
+        clearTimeout(settleTimer);
+        settleTimer=setTimeout(settleAtBottom,120);
       }
     };
     vv.addEventListener("resize",onResize);
-    return()=>vv.removeEventListener("resize",onResize);
+    return()=>{
+      vv.removeEventListener("resize",onResize);
+      clearTimeout(settleTimer);
+      if(settleFrame!==null)cancelAnimationFrame(settleFrame);
+    };
   },[]);
 
   // ── Presence: сообщаем серверу что мы в этом чате → сервер не шлёт FCM ──────
@@ -7793,6 +8288,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         ...(allMembers.length>0?{members:allMembers}:{})
       }).catch(()=>{});
 
+      // Счётчики для достижений профиля — не блокируют отправку, тихо игнорируем ошибку.
+      updateDoc(doc(db,"users",currentUser.uid),{
+        messagesSentCount:increment(1),
+        ...(extra.type==="voice"?{voiceMessagesSentCount:increment(1)}:{})
+      }).catch(()=>{});
+
       // Push is sent by Firebase Cloud Function on message create.
       return ref.id;
 
@@ -7849,15 +8350,15 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       position:fixed;
       right:${window.innerWidth-inputRect.right+8}px;
       top:${inputRect.top}px;
-      background:linear-gradient(135deg,#E53935,#B71C1C);
-      color:#fff;
+      background:linear-gradient(135deg,${accent},${accent2});
+      color:${contrastOn(accent)==="#000"?"#000":"#fff"};
       padding:9px 13px;
       border-radius:20px 20px 4px 20px;
       font-size:14px;
       line-height:1.55;
       max-width:72vw;
       word-break:break-word;
-      box-shadow:0 3px 14px rgba(229,57,53,0.4);
+      box-shadow:0 3px 14px ${accent}66;
       z-index:9999;
       pointer-events:none;
       opacity:1;
@@ -8237,8 +8738,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     _chatBackHandler=()=>{
       if(lightbox){setLightbox(null);return true;}
       if(circleFs){setCircleFs(null);return true;}
-      if(showChatInfo){setShowChatInfo(false);return true;}
-      if(showChatSettings){setShowChatSettings(false);return true;}
+      if(showChatInfo||showChatSettings){window.dispatchEvent(new Event("rmg-chat-modal-close"));return true;}
       if(showAddMembers){setShowAddMembers(false);return true;}
       if(showMembers){setShowMembers(false);return true;}
       if(showSearch){setShowSearch(false);return true;}
@@ -8687,7 +9187,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 }
 
 // ─── Chat List ────────────────────────────────────────────────────────────────
-function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile,onChatsLoad,
+function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   themeName,onChangeTheme,wallpaperId,onChangeWallpaper,accentId,onChangeAccent,
   msgFontSize=14,onChangeFontSize,onLogout,online=true,wsState="open"}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
@@ -9057,13 +9557,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
     <div style={{display:"flex",flexDirection:"column",height:"100vh",width:"100%",background:bg||"#0A0A0A",position:"relative"}}>
       {/* ── Top Header ── */}
       <div style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:14,paddingRight:14,paddingBottom:9,background:surface+"EE",borderBottom:`1px solid ${border}`,backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",flexShrink:0}}>
-        <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:9,minHeight:36}}>
-          {/* Left: avatar — click opens EditProfile directly */}
-          <button onClick={onEditProfile}
-            style={{background:"none",border:"none",padding:0,cursor:"pointer",lineHeight:0,borderRadius:"50%",WebkitTapHighlightColor:"transparent"}}
-            aria-label="Редактировать профиль">
-            <Avatar name={profile?.name||"?"} size={36} photo={profile?.photo}/>
-          </button>
+        <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"flex-end",marginBottom:9,minHeight:36}}>
           {/* Center: tab title — absolutely positioned, doesn't intercept clicks */}
           <div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",color:text,fontWeight:800,fontSize:20,display:"flex",alignItems:"center",gap:8,pointerEvents:"none",whiteSpace:"nowrap"}}>
             {tab==="all"&&(
@@ -9114,7 +9608,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
           }}>
           {/* Краткая инфа о пользователе — только на главной странице вкладки (settingsGroup === null) */}
           {!settingsGroup&&(
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"28px 16px 20px",background:surface,marginBottom:0,borderBottom:`1px solid ${border}`}}>
+            <div onClick={()=>onViewProfile?.(currentUser.uid)} style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"28px 16px 20px",background:surface,marginBottom:0,borderBottom:`1px solid ${border}`,cursor:"pointer",WebkitTapHighlightColor:"transparent"}}>
               <Avatar name={profile?.name||"?"} size={80} photo={profile?.photo}/>
               <div style={{color:text,fontWeight:800,fontSize:18,marginTop:12}}>{profile?.name||"—"}</div>
               {profile?.tag&&<div style={{color:accent,fontSize:13,marginTop:3}}>@{profile.tag}</div>}
@@ -9196,9 +9690,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
               <div key={tabDef.id} style={{minWidth:"100%",height:"100%",overflowY:"auto",paddingBottom:72}}>
                 {tabFiltered.length===0?(
                   !chatsReady?(
-                    <div style={{padding:"6px 0"}}>
+                    <div style={{padding:"6px 12px"}}>
                       {[0,1,2,3,4,5,6].map(i=>(
-                        <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 15px",opacity:Math.max(0.15,1-i*0.13)}}>
+                        <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",marginBottom:9,borderRadius:18,background:surface2,opacity:Math.max(0.15,1-i*0.13)}}>
                           <div className="rmg-skel" style={{width:52,height:52,borderRadius:"50%",flexShrink:0}}/>
                           <div style={{flex:1,minWidth:0}}>
                             <div className="rmg-skel" style={{width:`${45+((i*17)%30)}%`,height:13,borderRadius:7,marginBottom:8}}/>
@@ -9214,7 +9708,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
                       {chatsError&&<button onClick={()=>{setChatsReady(false);setChatsError("");setChatsReloadKey(k=>k+1);}} style={{marginTop:12,padding:"8px 14px",borderRadius:10,border:`1px solid ${border}`,background:surface2,color:accent,fontFamily:"inherit",fontWeight:700,cursor:"pointer"}}>Повторить</button>}
                     </div>
                   )
-                ):tabFiltered.map((c,i)=>{
+                ):(
+                <div style={{padding:"8px 12px 0"}}>
+                {tabFiltered.map((c,i)=>{
                   const name=getName(c);
                   const myUnread=c.unreadBy?.[currentUser.uid]||0;
                   const isNew=myUnread>0;
@@ -9223,18 +9719,19 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
                       onClick={()=>onOpen({...c,name})}
                       onContextMenu={e=>{e.preventDefault();openCtx(c,e);}}
                       onTouchStart={e=>{
-                        e.currentTarget.style.background=surface2;
-                        e.currentTarget._lp=setTimeout(()=>{openCtx(c,e);e.currentTarget.style.background="transparent";},500);
+                        e.currentTarget.style.background=border;
+                        e.currentTarget._lp=setTimeout(()=>{openCtx(c,e);e.currentTarget.style.background=surface2;},500);
                       }}
-                      onTouchEnd={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background="transparent";}}
-                      onTouchMove={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background="transparent";}}
+                      onTouchEnd={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background=surface2;}}
+                      onTouchMove={e=>{clearTimeout(e.currentTarget._lp);e.currentTarget.style.background=surface2;}}
                       style={{
-                        display:"flex",alignItems:"center",gap:14,padding:"13px 16px",
+                        display:"flex",alignItems:"center",gap:13,padding:"11px 13px",
+                        marginBottom:9,borderRadius:18,background:surface2,
                         cursor:"pointer",transition:"background 0.13s",
                         animation:`listIn 0.2s ease ${Math.min(i*0.04,0.3)}s both`,
                       }}>
                       <div style={{position:"relative",flexShrink:0}}>
-                        <Avatar name={name} size={54} photo={
+                        <Avatar name={name} size={50} photo={
                           c.type==="direct"
                             ?(()=>{const p=Object.keys(c.names||c.photos||{}).find(k=>k!==currentUser.uid);return bestPhoto(p&&photosCache[p],p&&(c.photos||{})[p],c._partnerPhoto);})()
                             :(c.photo||c._partnerPhoto||null)
@@ -9245,11 +9742,11 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
                             borderRadius:10,background:accent,
                             display:"flex",alignItems:"center",justifyContent:"center",
                             fontSize:10,fontWeight:700,color:contrastOn(accent),padding:"0 5px",
-                            border:`2.5px solid ${bg}`,
+                            border:`2.5px solid ${surface2}`,
                           }}>{myUnread>99?"99+":myUnread}</div>
                         )}
                       </div>
-                      <div style={{flex:1,minWidth:0,paddingBottom:14,borderBottom:`1px solid ${border}66`}}>
+                      <div style={{flex:1,minWidth:0}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
                           <div style={{color:text,fontWeight:isNew?700:500,fontSize:15,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1,letterSpacing:-0.1}}>
                             {c.type==="channel"?"📢 ":c.type==="group"?"🫂 ":""}{name}
@@ -9263,6 +9760,8 @@ function ChatList({currentUser,profile,onOpen,onFind,onEditProfile,onViewProfile
                     </div>
                   );
                 })}
+                </div>
+                )}
               </div>
             );
           })}
@@ -9448,6 +9947,21 @@ export default function App(){
   const[online,setOnline]=useState(navigator.onLine);
   const[wsState,setWsState]=useState("open"); // "open" | "connecting" | "closed" — для заголовка как в Telegram
   const[minSplashDone,setMinSplashDone]=useState(false);
+  const updateProfileLocal=useCallback(patch=>{
+    if(!patch||typeof patch!=="object")return;
+    setProfile(prev=>{
+      const next={...(prev||{}),...patch};
+      try{localStorage.setItem("rmg_cached_profile",JSON.stringify(next));}catch(e){}
+      return next;
+    });
+    setFbUser(prev=>{
+      if(!prev)return prev;
+      const next={...prev};
+      if(Object.prototype.hasOwnProperty.call(patch,"name"))next.displayName=patch.name||"";
+      if(Object.prototype.hasOwnProperty.call(patch,"photo"))next.photoURL=patch.photo||null;
+      return next;
+    });
+  },[]);
   useEffect(()=>{
     const up=()=>setOnline(true);
     const dn=()=>setOnline(false);
@@ -9717,6 +10231,16 @@ export default function App(){
     }
   }),[]);
 
+  useEffect(()=>{
+    if(!fbUser?.uid||fbUser._offline)return;
+    return onSnapshot(doc(db,"users",fbUser.uid),snap=>{
+      if(!snap.exists())return;
+      const next={...snap.data()};
+      setProfile(next);
+      try{localStorage.setItem("rmg_cached_profile",JSON.stringify(next));}catch(e){}
+    },()=>{});
+  },[fbUser?.uid,fbUser?._offline]);
+
   // fix10: avto-sinhronizaciya moej avatarki vo vse lichnye chaty
   useEffect(()=>{
     if(!fbUser||!profile?.photo||!String(profile.photo).startsWith("data:"))return;
@@ -9875,6 +10399,7 @@ export default function App(){
     @keyframes glassOrb2{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(-70px,30px) scale(0.85)}66%{transform:translate(50px,-60px) scale(1.2)}}
     @keyframes glassOrb3{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(40px,70px) scale(1.1)}}
     @keyframes glassShimmer{0%{background-position:200% center}100%{background-position:-200% center}}
+    @keyframes creatorSheen{0%{background-position:220% center}100%{background-position:-20% center}}
     input::placeholder,textarea::placeholder{color:${theme.text2}55}
     button{-webkit-user-select:none;user-select:none}
     .rmg-press{transition:transform 0.16s cubic-bezier(0.34,1.56,0.64,1),opacity 0.16s}
@@ -9999,20 +10524,21 @@ export default function App(){
 
         <div style={{position:"relative",zIndex:1,height:"100%"}}>
         {toast&&<Toast toast={toast} onClose={()=>setToast(null)}/>}
-        <AudioFullPlayerOverlay/>
+        <AudioFullPlayerOverlay currentUser={fbUser}/>
+        <ListenTimeTracker uid={fbUser?.uid}/>
 
         {/* Profile layer - always on top */}
         {viewProfileUid&&(
           <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:600}}>
-            <ProfileView uid={viewProfileUid} myUid={fbUser?.uid} onClose={()=>setViewProfileUid(null)} onStartChat={startChatWithUser}/>
+            <ProfileView uid={viewProfileUid} myUid={fbUser?.uid} onClose={()=>setViewProfileUid(null)} onStartChat={startChatWithUser} onProfileChange={updateProfileLocal}/>
           </div>
         )}
 
         {/* Main layer */}
         {!fbUser?(
-          <AuthScreen onAuth={(user,prof,isAnon)=>{setFbUser(user);setProfile(prof);if(isAnon)setEditing(true);}}/>
+          <AuthScreen onAuth={(user,prof,isAnon)=>{setFbUser(user);updateProfileLocal(prof);if(isAnon)setEditing(true);}}/>
         ):editing?(
-          <EditProfile currentUser={fbUser} profile={profile} onSave={updated=>{setProfile(updated);setEditing(false);}} onClose={()=>setEditing(false)}/>
+          <EditProfile currentUser={fbUser} profile={profile} onSave={updated=>{updateProfileLocal(updated);setEditing(false);}} onClose={()=>setEditing(false)}/>
         ):finding?(
           <FindPeople currentUser={fbUser} profile={profile} onClose={()=>setFinding(false)} onStartChat={chat=>{setFinding(false);setActiveChat(chat);setScreenAnim("toChat");setScreen("chat");}}/>
         ):(
@@ -10029,7 +10555,6 @@ export default function App(){
                 online={online} wsState={wsState}
                 onOpen={chat=>{setActiveChat(chat);setScreenAnim("toChat");setScreen("chat");}}
                 onFind={()=>setFinding(true)}
-                onEditProfile={()=>setEditing(true)}
                 onViewProfile={uid=>setViewProfileUid(uid)}
                 onChatsLoad={setAppChats}
                 themeName={themeName} onChangeTheme={changeTheme}

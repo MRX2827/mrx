@@ -6,7 +6,7 @@ const fb = (name) => fileURLToPath(new URL("./src/fb/" + name, import.meta.url))
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: "/mrx/",
+  base: "./",
   plugins: [react()],
   resolve: {
     alias: {
