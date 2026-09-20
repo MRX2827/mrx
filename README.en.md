@@ -9,6 +9,10 @@ MrX (project name RedMrxGram) is a free, Google-free Android messenger.
 - **Features:** text messages, voice messages, video circles, photos, videos, files, an inline audio player with a shared queue, stories, reactions, replies, pinned messages, favorites, profile achievements, themes, QR profile codes, and end-to-end UX for battery-friendly background push.
 - **Local-first:** messages and media are cached in SQLite on-device for offline access.
 
+## News
+
+News and updates: https://t.me/redmrxgram
+
 ## Building from source
 
 Requirements: Node.js 22+, pnpm, JDK 21, Android SDK (target SDK 36).

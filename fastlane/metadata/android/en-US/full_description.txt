@@ -1,0 +1,18 @@
+RedMrxGram is a free, Google-free messenger for Android. THIS IS A BETA: the app is under active development, features may change and break between updates, and more is coming.
+
+No Google, no Firebase, no FCM: nothing proprietary ships inside the APK. Push notifications are delivered by a built-in foreground service that keeps its own WebSocket connection to a public notification topic, so messages arrive even when the app is completely closed — no Google services and no third-party distributor apps required.
+
+The backend is a small open-source Go server with a SQLite-backed document store, powering accounts (JWT), chats, media storage and push fan-out.
+
+Features:
+• Text, voice and video-circle messages
+• Photos, videos, files and music sharing
+• Inline audio player with a shared queue
+• Stories and profile achievements
+• Reactions, replies, pinned messages and favorites
+• Themes and QR profile codes
+• Local-first: messages and media cached on-device (SQLite) for offline access
+
+Note: to keep background push reliable on aggressive OEM builds (Samsung, Xiaomi, etc.), set the app to "Unrestricted" battery usage in system settings.
+
+News and updates: https://t.me/redmrxgram
