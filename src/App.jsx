@@ -2109,6 +2109,8 @@ let _deeplinkHandler=null; // (type, tag) => Promise, ставит App-комп�
 const _deeplinkParse=(url)=>{
   try{
     const u=new URL(url);
+    // Фирменная схема mrx://u/<tag> — hostname тут "u"/"channel"/"group"
+    if(u.protocol==="mrx:")return {kind:u.hostname.toLowerCase(),tag:decodeURIComponent(u.pathname.replace(/^\//,"")).replace(/^@/,"").toLowerCase()};
     if(u.hostname!=="redmrxgram.duckdns.org")return null;
     const parts=u.pathname.split("/").filter(Boolean);
     if(parts.length<2)return null;
@@ -3748,13 +3750,27 @@ function EmojiPanel({open, onEmoji, onSticker, onClose}){
 }
 
 // ─── Group Members Modal ────────────────────────────────────────────────────
-function GroupMembersModal({chat,currentUser,onClose}){
+function GroupMembersModal({chat,currentUser,onClose,showToast}){
   const {surface,border,text,text2,accent}=useContext(ThemeCtx);
   const[members,setMembers]=useState([]);
   useEffect(()=>{
     Promise.all((chat.members||[]).map(uid=>getDoc(doc(db,"users",uid))))
       .then(docs=>setMembers(docs.filter(d=>d.exists()).map(d=>d.data())));
   },[]);
+  // Удаление участника: может создатель или админ. Себя и создателя удалить
+  // нельзя. Убираем из members + пишем системное сообщение «... покинул(а)».
+  const canKick=(chat.creatorUid===currentUser.uid)||((chat.admins||[]).includes(currentUser.uid));
+  const kick=async(m)=>{
+    try{
+      await updateDoc(doc(db,"chats",chat.id),{members:(chat.members||[]).filter(x=>x!==m.uid)});
+      await addDoc(collection(db,"chats",chat.id,"messages"),{
+        type:"system",text:`${m.name} удалён(а) из ${chat.type==="channel"?"канала":"группы"}`,
+        uid:currentUser.uid,author:"",createdAt:serverTimestamp(),time:timeNow()
+      }).catch(()=>{});
+      setMembers(ms=>ms.filter(x=>x.uid!==m.uid));
+      showToast?.({icon:"✓",title:"Участник удалён"});
+    }catch(e){showToast?.({icon:"!",title:"Ошибка",body:e?.message});}
+  };
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",alignItems:"flex-end"}} onClick={onClose}>
       <div style={{background:surface,borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"70vh",display:"flex",flexDirection:"column",animation:"slideUp 0.3s ease"}} onClick={e=>e.stopPropagation()}>
@@ -3770,6 +3786,9 @@ function GroupMembersModal({chat,currentUser,onClose}){
                 <div style={{color:text,fontWeight:600,fontSize:14}}>{m.name} {m.uid===chat.creatorUid?"👑":""}</div>
                 <div style={{color:accent,fontSize:12}}>@{m.tag}</div>
               </div>
+              {canKick&&m.uid!==chat.creatorUid&&m.uid!==currentUser.uid&&(
+                <button onClick={()=>kick(m)} style={{width:36,height:36,borderRadius:"50%",border:"none",background:"rgba(255,69,58,0.12)",color:"#ff453a",fontSize:16,fontWeight:800,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>✕</button>
+              )}
             </div>
           ))}
         </div>
@@ -3791,7 +3810,15 @@ function AddMembersModal({chat,currentUser,onClose}){
     setResults(found);setLoading(false);
   };
   const addMember=async(person)=>{
-    try{await updateDoc(doc(db,"chats",chat.id),{members:arrayUnion(person.uid)});setMembers(m=>[...m,person.uid]);setAdded(a=>[...a,person.uid]);}
+    try{
+      await updateDoc(doc(db,"chats",chat.id),{members:arrayUnion(person.uid)});
+      // Системное оповещение в чат о новом участнике (как в TG)
+      addDoc(collection(db,"chats",chat.id,"messages"),{
+        type:"system",text:`${person.name} присоединился к ${chat.type==="channel"?"каналу":"группе"}`,
+        uid:person.uid,author:"",createdAt:serverTimestamp(),time:timeNow()
+      }).catch(()=>{});
+      setMembers(m=>[...m,person.uid]);setAdded(a=>[...a,person.uid]);
+    }
     catch(e){alert("Ошибка: "+e.message);}
   };
   return(
@@ -5172,6 +5199,8 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
   const photoRef=useRef(null);
   const cleanTag=tag.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase();
   const inviteLink=`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag||chat?.id}`;
+  // ВАЖНО: беру СВЕЖЕСГЕНЕРИРОВАННУЮ ссылку, а не chat.inviteLink из базы:
+  // старые чаты хранят ссылки с несуществующего домена redmrxgram.app.
   const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
   const requestClose=useCallback(()=>{
     if(closing)return;
@@ -5290,7 +5319,9 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
   const[qrDataUrl,setQrDataUrl]=useState("");
   const tone=colorFor(chat?.name||"?");
   const cleanTag=(chat?.tag||chat?.id||"").replace(/^@/,"");
-  const inviteLink=chat?.inviteLink||`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag}`;
+  // БД-ссылки (chat.inviteLink) игнорируем: у старых чатов там мёртвый
+  // домен redmrxgram.app. Всегда генерируем заново по тегу.
+  const inviteLink=`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag}`;
 
   useEffect(()=>{
     if(!inviteLink)return;
@@ -6377,6 +6408,14 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
       <div style={{fontSize:52,lineHeight:1,userSelect:"none",filter:"drop-shadow(0 2px 8px rgba(0,0,0,0.3))"}}
         onTouchStart={onPStart} onTouchMove={onPMove} onTouchEnd={onPEnd} onMouseDown={onPStart} onMouseUp={onPEnd}>
         {msg.text}
+      </div>
+    );
+    // Системные сообщения (вступление/выход) — капсула по центру, как в TG.
+    if(msg.type==="system")return(
+      <div style={{display:"flex",justifyContent:"center",padding:"2px 0",animation:"fadeIn 0.3s ease"}}>
+        <div style={{background:"rgba(120,120,128,0.18)",color:text2,fontSize:12.5,fontWeight:600,borderRadius:14,padding:"5px 12px",maxWidth:"86%",textAlign:"center"}}>
+          {msg.text}
+        </div>
       </div>
     );
     const mineFg=fromMe?contrastOn(accent):text;
@@ -9248,7 +9287,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {showChatInfo&&<ChatInfoModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatInfo(false)} onOpenSettings={()=>{setShowChatInfo(false);setShowChatSettings(true);}}/>}
         {showChatSettings&&<ChatSettingsModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatSettings(false)} onSaved={patch=>setChatData(c=>({...c,...patch}))}/>}
         {showSearch&&<MsgSearch chatId={chat.id} onClose={()=>setShowSearch(false)} onJump={()=>{}}/> }
-      {showMembers&&<GroupMembersModal chat={chatData} currentUser={currentUser} onClose={()=>setShowMembers(false)}/>}
+      {showMembers&&<GroupMembersModal chat={chatData} currentUser={currentUser} onClose={()=>setShowMembers(false)} showToast={showToast}/>}
         {/* Forward Modal */}
       {fwdMsg&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",flexDirection:"column"}}>
@@ -10501,6 +10540,11 @@ export default function App(){
             // добавляемся, только если чат публичный (есть tag)
             if(data.tag){
               await updateDoc(doc(db,"chats",doc_.id),{members:arrayUnion(me)}).catch(()=>{});
+              // Оповещение о вступлении по ссылке
+              addDoc(collection(db,"chats",doc_.id,"messages"),{
+                type:"system",text:`${profile?.name||"Новый участник"} присоединился по ссылке`,
+                uid:me,author:"",createdAt:serverTimestamp(),time:timeNow()
+              }).catch(()=>{});
               const fresh=(await getDoc(doc(db,"chats",doc_.id))).data()||data;
               setActiveChat({id:doc_.id,...fresh,members:[...(fresh.members||[]),me]});
             }
