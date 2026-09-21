@@ -4293,6 +4293,7 @@ function fmtJoinedDate(ms){
   const d=new Date(ms);
   return `${String(d.getDate()).padStart(2,"0")}.${String(d.getMonth()+1).padStart(2,"0")}.${d.getFullYear()}`;
 }
+const isBotTag=(tag)=>typeof tag==="string"&&tag.toLowerCase().endsWith("_bot");
 const CREATOR_UID="738cdd2c759b7fd3204d9dffcae0e176";
 // Секретное мифическое достижение: существует только у одного человека.
 // unlocked переопределён на проверку uid — не выдаётся ни через hasAllAchievements,
@@ -5009,7 +5010,7 @@ function FindPeople({currentUser,profile,onClose,onStartChat}){
           {results.map((p,i)=>(
             <div key={p.uid} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:`1px solid ${border}`,animation:`msgIn 0.2s ease ${i*0.05}s both`}}>
               <Avatar name={p.name} size={50} photo={p.photo}/>
-              <div style={{flex:1}}><div style={{color:text,fontWeight:600,fontSize:14}}>{p.name}</div><div style={{color:accent,fontSize:12,marginTop:2}}>@{p.tag}</div></div>
+              <div style={{flex:1}}><div style={{color:text,fontWeight:600,fontSize:14,display:"flex",alignItems:"center",gap:6}}>{p.name}{isBotTag(p.tag)&&<span style={{background:accent,color:"#fff",borderRadius:5,padding:"0 5px",fontSize:9,fontWeight:800,letterSpacing:.5}}>БОТ</span>}</div><div style={{color:accent,fontSize:12,marginTop:2}}>@{p.tag}</div></div>
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
                 <button onClick={()=>startChat(p)} style={{background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",borderRadius:13,padding:"8px 14px",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Написать</button>
                 <button onClick={()=>addContact(p)} disabled={contacts.includes(p.uid)} style={{background:contacts.includes(p.uid)?surface2:"transparent",border:`1px solid ${contacts.includes(p.uid)?border:accent}`,borderRadius:13,padding:"7px 12px",color:contacts.includes(p.uid)?text2:accent,fontSize:12,fontWeight:700,cursor:contacts.includes(p.uid)?"default":"pointer",fontFamily:"inherit"}}>{contacts.includes(p.uid)?"В контактах":"Добавить"}</button>
@@ -6289,7 +6290,7 @@ function EditProfile({currentUser,profile,onSave,onClose}){
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 // ─── Message ─────────────────────────────────────────────────────────────────
-function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,idx,audioMsgs,chatId}){
+function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,idx,audioMsgs,chatId,onBotCmd}){
   const {accent,accent2,surface2,text,text2,bg}=useContext(ThemeCtx);
   const fromMe=msg.uid===myUid;
   const showAvatar=!fromMe&&msg.uid!==prevMsg?.uid;
@@ -6475,12 +6476,25 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
       <div ref={msgRef} style={{display:"flex",flexDirection:"column",alignItems:fromMe?"flex-end":"flex-start",maxWidth:"78%",position:"relative",
         transform:`translateX(${swipeX}px)`,transition:swiping?"none":"transform 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>
         {!fromMe&&msg.uid!==prevMsg?.uid&&!isSticker&&!isCircle&&(
-          <div style={{fontSize:11,color:colorFor(msg.author||"?"),marginBottom:2,paddingLeft:3,fontWeight:600}}>{msg.author}</div>
+          <div style={{fontSize:11,color:colorFor(msg.author||"?"),marginBottom:2,paddingLeft:3,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>
+            {msg.author}
+            {(isBotTag(msg.botTag)||isBotTag(usersCache?.[msg.uid]?.tag))&&<span style={{background:accent,color:"#fff",borderRadius:5,padding:"0 5px",fontSize:9,fontWeight:800,letterSpacing:.5}}>БОТ</span>}
+          </div>
         )}
         {renderContent()}
         {msg._uploading&&(
           <div style={{width:"min(180px,100%)",height:3,borderRadius:3,overflow:"hidden",background:"rgba(255,255,255,0.16)",marginTop:5}}>
             <div style={{height:"100%",width:`${Math.max(6,Math.min(100,msg._uploadPct||8))}%`,borderRadius:3,background:accent,transition:"width 0.18s ease"}}/>
+          </div>
+        )}
+        {Array.isArray(msg.buttons)&&msg.buttons.length>0&&(
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5,marginTop:6,marginBottom:2}}>
+            {msg.buttons.map((b,i)=>(
+              <button key={i} onClick={()=>{if(b&&b.cmd&&typeof onBotCmd==="function")onBotCmd(b.cmd);}}
+                style={{background:fromMe?mineSoft(0.12):"rgba(120,120,128,0.16)",border:`1px solid ${fromMe?mineSoft(0.2):"rgba(120,120,128,0.25)"}`,borderRadius:10,padding:"7px 6px",color:fromMe?mineFg:text,fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit",textAlign:"center",minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                {b.text||b.cmd||"—"}
+              </button>
+            ))}
           </div>
         )}
         {!isSticker&&<div style={{fontSize:10,color:"#555",marginTop:2,display:"flex",alignItems:"center",gap:3}}>
@@ -9041,7 +9055,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           ):null}
           {msgs.map((m,i)=>{
             if(m.deletedFor?.[currentUser.uid]||m.deletedForAll)return null;
-            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id}/>;
+            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{setInputText(cmd);setTimeout(()=>handleSend(),30);}}/>;
           })}
           <div ref={bottomRef}/>
           <div ref={imeSpacerRef} style={{flexShrink:0}}/>
