@@ -2100,7 +2100,7 @@ window.rmgRegisterImeDock=(cfg)=>{
   }
 };
 
-// ── Диплинки: https://redmrxgram.app/u/<tag> | /channel/<tag> | /group/<tag> ──
+// ── Диплинки: https://redmrxgram.duckdns.org/u/<tag> | /channel/<tag> | /group/<tag> ──
 // Нативный intent-filter ловит ссылку, Capacitor App отдаёт её сюда.
 // Пока App не залогинился — ссылка копится в _deeplinkQueue; App-компонент
 // забирает её после загрузки профиля.
@@ -2109,7 +2109,7 @@ let _deeplinkHandler=null; // (type, tag) => Promise, ставит App-комп�
 const _deeplinkParse=(url)=>{
   try{
     const u=new URL(url);
-    if(u.hostname!=="redmrxgram.app")return null;
+    if(u.hostname!=="redmrxgram.duckdns.org")return null;
     const parts=u.pathname.split("/").filter(Boolean);
     if(parts.length<2)return null;
     const kind=parts[0].toLowerCase();
@@ -4402,7 +4402,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
 
   useEffect(()=>{
     if(!uid||!user)return;
-    const link=`https://redmrxgram.app/u/${encodeURIComponent(user.tag||uid)}`;
+    const link=`https://redmrxgram.duckdns.org/u/${encodeURIComponent(user.tag||uid)}`;
     import("qrcode").then(mod=>{
       const QR=mod.default||mod;
       return QR.toDataURL(link,{width:360,margin:1,color:{dark:"#111111",light:"#ffffff"}});
@@ -4650,7 +4650,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const color=profileTone||colorFor(user.name||"?");
   const profileAccent=color;
   const hasPhoto=!!user.photo;
-  const profileLink=`https://redmrxgram.app/u/${encodeURIComponent(user.tag||uid)}`;
+  const profileLink=`https://redmrxgram.duckdns.org/u/${encodeURIComponent(user.tag||uid)}`;
   const profileBg=(!bg||bg==="transparent"||String(bg).includes("rgba"))?"#050505":bg;
   const profileSurface=(String(surface).includes("rgba")||surface==="transparent")?"#120203":surface;
   // Скрытые достижения видны только их обладателям: для всех остальных их
@@ -5121,7 +5121,7 @@ function CreateModal({type,currentUser,profile,onClose,onCreated}){
   const create=async()=>{
     if(!chatName.trim())return;setLoading(true);
     try{const tag2=chatName.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/gi,"")+Math.floor(100+Math.random()*900);
-      const r=await addDoc(collection(db,"chats"),{type,name:chatName.trim(),desc,tag:tag2,members:[currentUser.uid],creatorUid:currentUser.uid,creatorName:profile.name,created:serverTimestamp(),lastMsg:"",lastTime:"",photo:photo||null,inviteLink:`https://redmrxgram.app/${type}/${tag2}`});
+      const r=await addDoc(collection(db,"chats"),{type,name:chatName.trim(),desc,tag:tag2,members:[currentUser.uid],creatorUid:currentUser.uid,creatorName:profile.name,created:serverTimestamp(),lastMsg:"",lastTime:"",photo:photo||null,inviteLink:`https://redmrxgram.duckdns.org/${type}/${tag2}`});
       if(type==="group")updateDoc(doc(db,"users",currentUser.uid),{hasCreatedGroup:true}).catch(()=>{});
       onCreated({id:r.id,type,name:chatName.trim(),desc,tag:tag2,photo:photo||null,creatorUid:currentUser.uid,members:[currentUser.uid]});}
     catch(e){alert("Ошибка: "+e.message);}
@@ -5171,7 +5171,7 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
   }));
   const photoRef=useRef(null);
   const cleanTag=tag.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase();
-  const inviteLink=`https://redmrxgram.app/${isChannel?"channel":"group"}/${cleanTag||chat?.id}`;
+  const inviteLink=`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag||chat?.id}`;
   const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
   const requestClose=useCallback(()=>{
     if(closing)return;
@@ -5290,7 +5290,7 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
   const[qrDataUrl,setQrDataUrl]=useState("");
   const tone=colorFor(chat?.name||"?");
   const cleanTag=(chat?.tag||chat?.id||"").replace(/^@/,"");
-  const inviteLink=chat?.inviteLink||`https://redmrxgram.app/${isChannel?"channel":"group"}/${cleanTag}`;
+  const inviteLink=chat?.inviteLink||`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag}`;
 
   useEffect(()=>{
     if(!inviteLink)return;
