@@ -124,6 +124,7 @@ import { collection, doc, setDoc, getDoc, addDoc, query, orderBy, onSnapshot, wh
 import { App as CapApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { NativePush } from "./native-push.js";
+import { NativeMedia } from "./native-media.js";
 import { api } from "./fb/core.js";
 
 // ── Скрытые (удалённые у себя) чаты: {chatId: момент удаления ms}. Старый формат-массив мигрируем.
@@ -904,6 +905,19 @@ const ThemeCtx = createContext({bg:'#000',surface:'#111',surface2:'#1a1a1a',bord
 // Используется в AudioPlayerScreen, MiniPlayer, SpeedPopup для единообразия
 const formatSpeed=(s)=>`${s}×`;
 
+// ─── «Показанные» сообщения: анимация выезда — только при ПЕРВОМ появлении ────
+// При подмене id (tmp_… → реальный после addDoc, local_… → реальный после
+// загрузки файла) React перемонтирует бабл, и без этого сета анимация
+// проигрывалась бы ПОВТОРНО — видимое «дёргание». sendMsg помечает сюда
+// будущий реальный id ДО подмены, поэтому перемонт проходит тихо.
+const MSG_SEEN_IDS=new Set();
+function markMsgSeen(id){
+  if(!id)return;
+  MSG_SEEN_IDS.add(id);
+  // Подрезаем, чтобы сет не рос бесконечно за долгую сессию
+  if(MSG_SEEN_IDS.size>4000){let n=0;for(const k of MSG_SEEN_IDS){MSG_SEEN_IDS.delete(k);if(++n>=1500)break;}}
+}
+
 // ─── Global Music Player ─────────────────────────────────────────────────────
 // ─── Global Audio Engine (singleton, survives React re-renders) ───────────────
 const AudioCtx = createContext(null);
@@ -930,6 +944,7 @@ const AUDIO_ENGINE = {
       shuffle:this.shuffle, repeat:this.repeat, speed:this.speed,
     };
     try{this.listeners.forEach(fn=>{try{fn(snap);}catch(e){}});}catch(e){}
+    try{this._syncNativeMedia();}catch(e){}
   },
 
   _buildEl(src){
@@ -1059,13 +1074,14 @@ const AUDIO_ENGINE = {
     const pi=this._prevIdx();if(pi!==-1)this.jumpTo(pi,true);
   },
 
-  seek(ratio){if(!this.el||!this.el.duration)return;this.el.currentTime=ratio*this.el.duration;this._updateMediaSessionPosition(true);},
-  seekTo(sec){if(!this.el)return;this.el.currentTime=sec;this._updateMediaSessionPosition(true);},
+  seek(ratio){if(!this.el||!this.el.duration)return;this.el.currentTime=ratio*this.el.duration;this._updateMediaSessionPosition(true);this._syncNativeMedia();},
+  seekTo(sec){if(!this.el)return;this.el.currentTime=sec;this._updateMediaSessionPosition(true);this._syncNativeMedia();},
 
   setSpeed(s){
     this.speed=s;
     if(this.el)this.el.playbackRate=s;
     this._updateMediaSessionPosition(true);
+    this._syncNativeMedia();
     this.notify();this._persist();
   },
 
@@ -1099,6 +1115,7 @@ const AUDIO_ENGINE = {
     this._savePos();
     if(this.el){try{this.el.pause();this.el.src="";}catch(e){}this.el=null;}
     this.playing=false;this.idx=-1;this.queue=[];this.historyStack=[];
+    try{this._syncNativeMedia();}catch(e){} // трека нет → NativeMedia.clear()
     this.notify();this._persist();
   },
 
@@ -1140,6 +1157,49 @@ const AUDIO_ENGINE = {
       });
       navigator.mediaSession.playbackState=this.playing?"playing":"paused";
     }catch(e){}
+  },
+
+  // ── Нативный медиа-плагин (Android): плеер в шторке уведомлений ───────────
+  // Нативная часть — только зеркало состояния (MediaStyle-нотификация +
+  // MediaSession); звук играет <audio> в WebView. Нажатия кнопок приходят
+  // событием "mediaCommand" и выполняются здесь, в AUDIO_ENGINE.
+  // Синхронизируем ТОЛЬКО смены состояния (трек/play/pause/seek/speed/stop),
+  // НЕ каждый кадр: на Android 13+ seekbar экстраполирует позицию сам из
+  // PlaybackState (position + playbackRate), на 10–12 позиция в шторке
+  // статична по ограничению ОС.
+  _nativeMediaReady:false,
+  _initNativeMedia(){
+    if(this._nativeMediaReady)return;
+    if(!Capacitor.isNativePlatform())return;
+    this._nativeMediaReady=true;
+    try{
+      NativeMedia.addListener("mediaCommand",(e)=>{
+        const cmd=e?.command||"";
+        const el=this.el;
+        if(cmd==="play")this.play();
+        else if(cmd==="pause")this.pause();
+        else if(cmd==="next")this.next();
+        else if(cmd==="prev")this.prev();
+        else if(cmd==="rew"&&el)this.seekTo(Math.max(0,(el.currentTime||0)-10));
+        else if(cmd==="ffw"&&el)this.seekTo(Math.min(el.duration||0,(el.currentTime||0)+10));
+        else if(cmd==="seek"&&el&&typeof e?.position==="number")this.seekTo(e.position);
+        else if(cmd==="close")this.stop();
+      });
+    }catch(e){}
+  },
+  _syncNativeMedia(){
+    if(!Capacitor.isNativePlatform())return;
+    const t=this.track;
+    if(!t){NativeMedia.clear().catch(()=>{});return;}
+    this._initNativeMedia();
+    NativeMedia.update({
+      title:t.name||"Audio",
+      author:t.author||t.chatName||"MrX",
+      playing:!!this.playing,
+      duration:this.el?.duration||0,
+      position:this.el?.currentTime||0,
+      speed:this.speed||1,
+    }).catch(()=>{});
   },
 
   _persist(){
@@ -6300,6 +6360,11 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   const isSticker=msg.type==="sticker";
   const isCircle=msg.type==="circle";
 
+  // Анимация выезда — только при первом появлении на экране; подмены id
+  // (tmp_→реальный, local_→реальный) монтируются уже «тихими».
+  const seenBefore=MSG_SEEN_IDS.has(msg.id);
+  if(!seenBefore)markMsgSeen(msg.id);
+
   // ── Swipe to reply ──────────────────────────────────────────────────────
   const[swipeX,setSwipeX]=useState(0);
   const[swiping,setSwiping]=useState(false);
@@ -6463,7 +6528,7 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   return(
     <div style={{display:"flex",flexDirection:fromMe?"row-reverse":"row",alignItems:"flex-end",gap:6,
       marginBottom:2,paddingLeft:fromMe?40:0,paddingRight:fromMe?0:40,
-      animation:getS("bubbleAnim")===false?undefined:`msgIn 0.22s cubic-bezier(0.34,1.56,0.64,1) ${Math.min(idx*0.016,0.1)}s both`,
+      animation:(getS("bubbleAnim")===false||seenBefore)?undefined:`${fromMe?"msgInMe":"msgInThem"} 0.55s cubic-bezier(0.22,1,0.36,1) ${Math.min(idx*0.016,0.1)}s both`,
       position:"relative"}}
       onTouchStart={onTStart}
       onTouchMove={onTMove}
@@ -7476,6 +7541,87 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
 }
 
 // ─── Full Audio Player Screen ────────────────────────────────────────────────
+// ─── RGB-волна (артворк полноэкранного плеера, canvas ~45 fps) ───────────────
+// Процедурная волна, НЕ настоящий FFT: createMediaElementSource маршрутизирует
+// звук через AudioContext и при сбое CORS/автоплей-политики в WebView молча
+// глушит трек — недопустимо. Вместо этого слойные синусоиды с RGB-глоу; на
+// паузе амплитуда плавно затухает к лёгкому «дыханию». seed (id трека) задаёт
+// фазы — каждый трек выглядит по-своему. Глоу — двойной обводкой (широкая
+// полупрозрачная + тонкая яркая), т.к. shadowBlur на WebView слишком дорог
+// для 45 fps.
+function AudioWave({playing,seed}){
+  const canvasRef=useRef(null);
+  const stRef=useRef({amp:0.16,last:0,t:0});
+  // Цвет волны — ВСЕГДА красный (фирменный MrX), независимо от темы.
+  // Слои различаются только светлототой — глубина без радуги.
+  const hslRef=useRef({h:0,s:85,l:58});
+  useEffect(()=>{
+    const canvas=canvasRef.current;if(!canvas)return;
+    const c=canvas.getContext("2d");
+    let raf=null;
+    const FRAME=1000/45; // ровно 45 fps
+    const draw=(now)=>{
+      raf=requestAnimationFrame(draw);
+      const st=stRef.current;
+      if(now-st.last<FRAME)return;
+      const dt=Math.min(0.05,(now-st.last)/1000);
+      st.last=now;
+      const target=playing?1:0.16;
+      st.amp+=(target-st.amp)*Math.min(1,dt*3.5);
+      st.t+=dt*(playing?1:0.25);
+      const w=canvas.clientWidth,h=canvas.clientHeight;
+      if(!w||!h)return;
+      const dpr=Math.min(2,window.devicePixelRatio||1);
+      if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){
+        canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);
+      }
+      c.setTransform(dpr,0,0,dpr,0,0);
+      c.clearRect(0,0,w,h);
+      // seed → стабильный сдвиг фаз на трек
+      let sh=0;const s=seed||"";for(let i=0;i<s.length;i++)sh=(sh*31+s.charCodeAt(i))%10007;
+      const cy=h/2,t=st.t;
+      c.globalCompositeOperation="lighter"; // RGB-глоу на тёмном фоне
+      const LAYERS=5;
+      const {h:hh,s:ss,l:ll}=hslRef.current;
+      for(let L=0;L<LAYERS;L++){
+        const li=Math.max(14,Math.min(88,ll+16-L*7));
+        const col=`hsla(${hh|0},${ss}%,${li|0}%,`;
+        const amp=h*0.30*st.amp*(1-L*0.09)*(0.62+0.38*Math.sin(t*1.6+L*2.1));
+        const f1=1.5+((L*7+sh)%5)*0.4, f2=4+((L*3+sh)%7)*0.55;
+        const p1=t*(1.0+L*0.33)+sh*0.013+L, p2=t*(2.1+L*0.47)+L*3;
+        const pts=[];
+        for(let x=0;x<=w;x+=3){
+          const u=x/w,env=Math.sin(Math.PI*u)**2; // огибающая: затухание к краям
+          const y=cy
+            +Math.sin(u*f1*Math.PI*2+p1)*amp*0.62*env
+            +Math.sin(u*f2*Math.PI*2+p2)*amp*0.38*env;
+          pts.push(x,y);
+        }
+        // мягкая заливка вниз от волны
+        c.beginPath();
+        c.moveTo(pts[0],pts[1]);
+        for(let i=2;i<pts.length;i+=2)c.lineTo(pts[i],pts[i+1]);
+        c.lineTo(w,h);c.lineTo(0,h);c.closePath();
+        const grad=c.createLinearGradient(0,cy-amp,0,h);
+        grad.addColorStop(0,col+"0.16)");
+        grad.addColorStop(1,col+"0)");
+        c.fillStyle=grad;c.fill();
+        // глоу: широкая полупрозрачная обводка…
+        c.beginPath();
+        c.moveTo(pts[0],pts[1]);
+        for(let i=2;i<pts.length;i+=2)c.lineTo(pts[i],pts[i+1]);
+        c.strokeStyle=col+"0.22)";c.lineWidth=7-L*0.7;c.stroke();
+        // …и тонкая яркая поверх
+        c.strokeStyle=col+"0.95)";c.lineWidth=2.1-L*0.15;c.stroke();
+      }
+      c.globalCompositeOperation="source-over";
+    };
+    raf=requestAnimationFrame(draw);
+    return ()=>{cancelAnimationFrame(raf);c.setTransform(1,0,0,1,0,0);};
+  },[playing,seed]);
+  return <canvas ref={canvasRef} style={{width:"100%",height:"100%",display:"block"}}/>;
+}
+
 function AudioPlayerScreen({currentUser}){
   const {surface,surface2,border,text,text2,accent,accent2,bg}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
@@ -7656,19 +7802,17 @@ function AudioPlayerScreen({currentUser}){
             <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
           </div>
         ):(<>
-        {/* Artwork */}
+        {/* Artwork: живая RGB-волна (canvas, 45 fps) вместо сплошного цвета */}
         <div style={{display:"flex",justifyContent:"center",padding:"20px 32px 24px"}}>
           <div style={{
             width:"min(320px,78vw)",height:"min(320px,78vw)",
             borderRadius:20,
-            background:`linear-gradient(135deg,${accent}88,${accent2}66)`,
+            background:"#0A0A0A",
             display:"flex",alignItems:"center",justifyContent:"center",
             boxShadow:"0 20px 50px rgba(0,0,0,0.5)",
             overflow:"hidden",flexShrink:0,
           }}>
-            {track.coverUrl
-              ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-              :<IcMusicNote size={64} color="#fff"/>}
+            <AudioWave playing={!!playing} seed={track.id||track.name||"x"}/>
           </div>
         </div>
 
@@ -8404,6 +8548,19 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     const payload={author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,time:timeNow(),createdAt:serverTimestamp(),...extra};
     const replyBase=payload._replyTo||replyTo;
     delete payload._replyTo;
+    // Служебные флаги (на сервер НЕ идут): _quietAnim — бабл уже был на
+    // экране (заглушка загрузки файла) → tmp_ не анимируется повторно;
+    // _localPreview — blob-поля, чтобы заглушка tmp_ показывала ТОТ ЖЕ
+    // локальный файл (без мигания удалённого→загруженного).
+    const quietAnim=!!payload._quietAnim;
+    delete payload._quietAnim;
+    const localPreview=payload._localPreview;
+    delete payload._localPreview;
+    // Бесшовная подмена: заглушка загрузки (local_...) заменяется оптимистичным
+    // tmp_ В ОДНОМ state-обновлении — без remove+add (иначе был визуальный
+    // разрыв и повторная анимация).
+    const replaceLocalId=payload._replaceLocalId;
+    delete payload._replaceLocalId;
     if(replyBase)payload.replyTo={
       id:replyBase.id,author:replyBase.author,uid:replyBase.uid,type:replyBase.type,
       text:replyBase.text||replyBase.fileName||"",
@@ -8417,8 +8574,16 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
     // ── Оптимистичное сообщение — появляется мгновенно ──
     const optimistic={...payload,id:tempId,createdAt:{toDate:()=>now,seconds:now.getTime()/1000},_pending:true};
-    setMsgs(prev=>[...prev,optimistic]);
-    saveMsg({...optimistic,chatId:chat.id});
+    if(localPreview)Object.assign(optimistic,localPreview);
+    if(quietAnim)markMsgSeen(tempId);
+    if(replaceLocalId){
+      delete localSendingRef.current[replaceLocalId];
+      setMsgs(prev=>[...prev.filter(m=>m.id!==replaceLocalId),optimistic]);
+      // blob: URL в локальный кэш не пишем — реальный doc придёт из слушателя
+    }else{
+      setMsgs(prev=>[...prev,optimistic]);
+      saveMsg({...optimistic,chatId:chat.id});
+    }
 
     // Если чат был скрыт у меня («удалён»), снимаем скрытие ТОЛЬКО сейчас —
     // при реальной отправке сообщения, а не просто при открытии чата/профиля.
@@ -8430,6 +8595,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
     try{
       const ref = await addDoc(collection(db,"chats",chat.id,"messages"),payload);
+      markMsgSeen(ref.id); // переименование tmp_→реальный id — без повторной анимации
       // Заменяем временное на реальное (onSnapshot тоже придёт, но ключ совпадёт).
       // Если живой слушатель уже успел принести этот же документ (гонка с
       // WebSocket — часто на нестабильной связи), НЕ переименовываем tempId в
@@ -8723,8 +8889,9 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       try{
         const fileUrl=await serverUpload(file,pct=>updateLocalSending(localId,{_uploadPct:pct||3}));
         const finalMsg={type:msgType,fileName:file.name,fileType:contentType,fileSize:file.size,fileUrl,...(videoThumb?{videoThumb}:{}),...(replySnap?{_replyTo:replySnap}:{} )};
-        removeLocalSending(localId);
-        const realId=await sendMsg(finalMsg);
+        // Бесшовно: заглушка загрузки (блоб-URL) подменяется настоящим
+        // сообщением в ОДНОМ рендере — без исчезновения и повторной анимации.
+        const realId=await sendMsg({...finalMsg,_replaceLocalId:localId,_quietAnim:true,_localPreview:{fileUrl:localUrl}});
         if(realId){
           const offlineMsg={...finalMsg,id:realId,author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,time:timeNow(),createdAt:{seconds:Math.floor(Date.now()/1000)}};
           await OfflineStore.saveLocalFile(chat.id,offlineMsg,file);
@@ -8769,8 +8936,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             if(snap.totalBytes)updateLocalSending(localId,{_uploadPct:Math.round((snap.bytesTransferred/snap.totalBytes)*100)});
           },rej,res));
           const audioUrl=await getDownloadURL(storageRef);
-          removeLocalSending(localId);
-          sendMsg({type:"voice",duration:dur,waveform:wf,audioUrl});
+          sendMsg({type:"voice",duration:dur,waveform:wf,audioUrl,_replaceLocalId:localId,_quietAnim:true,_localPreview:{audioUrl:localUrl}});
         }catch(e){
           const r=new FileReader();r.onloadend=()=>{removeLocalSending(localId);sendMsg({type:"voice",duration:dur,waveform:wf,audioData:r.result});URL.revokeObjectURL(localUrl);};r.readAsDataURL(blob);
         }
@@ -8836,8 +9002,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           const videoThumb=await createVideoPoster(circleFile);
           addLocalSending({id:localId,author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoUrl:localUrl,...(videoThumb?{videoThumb}:{}),time:timeNow(),createdAt:{toDate:()=>new Date(),seconds:Date.now()/1000},_pending:true,_uploading:true,_uploadPct:8});
           const videoUrl=await serverUpload(circleFile,pct=>updateLocalSending(localId,{_uploadPct:pct||8}));
-          removeLocalSending(localId);
-          sendMsg({type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoUrl,...(videoThumb?{videoThumb}:{} )});
+          sendMsg({type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoUrl,...(videoThumb?{videoThumb}:{} ),_replaceLocalId:localId,_quietAnim:true,_localPreview:{videoUrl:localUrl}});
           playSound("sent");
         }catch(err){
           // Fallback: base64 (только для совсем маленьких кружков)
@@ -9040,7 +9205,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             // loadingOlderRef — синхронная проверка, не ждём setState
             if(el.scrollTop<200&&!loadingOlderRef.current)loadOlderMsgs();
           }}
-          style={{flex:1,overflowY:"auto",scrollBehavior:"auto",padding:"10px 8px",display:"flex",flexDirection:"column",
+          style={{flex:1,overflowY:"auto",overflowX:"hidden",scrollBehavior:"auto",padding:"10px 8px",display:"flex",flexDirection:"column",
           background:wallpaperId&&wallpaperId!=="none"?(WALLPAPERS.find(w=>w.id===wallpaperId)||{}).bg||"none":"none",
           backgroundSize:"auto",
         }} onMouseDown={e=>{const a=document.activeElement;if(a&&(a.tagName==="INPUT"||a.tagName==="TEXTAREA"))e.preventDefault();}} onClick={closeOverlaysOutside}>
@@ -10603,6 +10768,10 @@ export default function App(){
     @keyframes rmgPlayPulse{0%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 var(--rmg-accent-b)}70%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 14px transparent}100%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 transparent}}
     @keyframes rmgRowIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
     @keyframes msgIn{0%{opacity:0;transform:translateY(16px) scale(0.92)}50%{opacity:1;transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:none}}
+    /* Баблы выезжают СБОКУ: свои — справа налево, чужие — слева направо.
+       Плавно: длинный мягкий выезд + едва заметный докат, без резких пружин */
+    @keyframes msgInMe{0%{opacity:0;transform:translateX(52px)}70%{opacity:1;transform:translateX(-3px)}100%{opacity:1;transform:none}}
+    @keyframes msgInThem{0%{opacity:0;transform:translateX(-52px)}70%{opacity:1;transform:translateX(3px)}100%{opacity:1;transform:none}}
     @keyframes bubbleIn{from{opacity:0;transform:scale(0.88) translateY(6px)}to{opacity:1;transform:none}}
     @keyframes splashRing{from{transform:scale(0.88);opacity:0.7}to{transform:scale(1.3);opacity:0}}
     @keyframes circleIn{from{opacity:0;transform:scale(0.65)}to{opacity:1;transform:scale(1)}}
