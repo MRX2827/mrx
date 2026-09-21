@@ -121,6 +121,7 @@ import { auth, db, storage } from "./firebase";
 import { ref as sRef, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, signInAnonymously, registerAccount, verifyEmailCode, resendEmailCode, attachEmail, requestPasswordReset, confirmPasswordReset } from "firebase/auth";
 import { collection, doc, setDoc, getDoc, addDoc, query, orderBy, onSnapshot, where, getDocs, serverTimestamp, updateDoc, arrayUnion, limitToLast, startAfter, endBefore, deleteDoc, increment } from "firebase/firestore";
+import { App as CapApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { NativePush } from "./native-push.js";
 import { api } from "./fb/core.js";
@@ -2098,6 +2099,40 @@ window.rmgRegisterImeDock=(cfg)=>{
     _imeR.spacer.style.height=_imeDockH+"px";
   }
 };
+
+// ── Диплинки: https://redmrxgram.app/u/<tag> | /channel/<tag> | /group/<tag> ──
+// Нативный intent-filter ловит ссылку, Capacitor App отдаёт её сюда.
+// Пока App не залогинился — ссылка копится в _deeplinkQueue; App-компонент
+// забирает её после загрузки профиля.
+let _deeplinkQueue=[];
+let _deeplinkHandler=null; // (type, tag) => Promise, ставит App-компонент
+const _deeplinkParse=(url)=>{
+  try{
+    const u=new URL(url);
+    if(u.hostname!=="redmrxgram.app")return null;
+    const parts=u.pathname.split("/").filter(Boolean);
+    if(parts.length<2)return null;
+    const kind=parts[0].toLowerCase();
+    if(kind!=="u"&&kind!=="channel"&&kind!=="group")return null;
+    return {kind,tag:decodeURIComponent(parts[1]).replace(/^@/,"").toLowerCase()};
+  }catch{return null;}
+};
+const _deeplinkDispatch=(url)=>{
+  const d=_deeplinkParse(url);
+  if(!d)return;
+  if(_deeplinkHandler)try{_deeplinkHandler(d.kind,d.tag);}catch{}
+  else _deeplinkQueue.push(d);
+};
+// Регистрация обработчика + разбор накопленного
+window.rmgSetDeeplinkHandler=(fn)=>{
+  _deeplinkHandler=fn||null;
+  const q=_deeplinkQueue;_deeplinkQueue=[];
+  for(const d of q)try{_deeplinkHandler(d.kind,d.tag);}catch{}
+};
+// Холодный старт: ссылка, по которой открыли приложение
+CapApp.getLaunchUrl().then(({url})=>{if(url)_deeplinkDispatch(url);}).catch(()=>{});
+// Приложение уже открыто, юзер тапнул ссылку
+CapApp.addListener("appUrlOpen",({url})=>{_deeplinkDispatch(url);}).catch(()=>{});
 
 let _storyBackHandler = null;
 let _profileBackHandler = null;
@@ -10423,6 +10458,66 @@ export default function App(){
       setToast({icon:"!",title:"Чат не открыт",body:e?.message||String(e)});
     }
   };
+
+  // ── Диплинки: /u/<tag> → профиль; /channel/<tag>, /group/<tag> → чат ──────
+  // Ссылку ловит intent-filter + CapApp (глобальный парсер выше). Здесь
+  // находим пользователя/чат по тегу и открываем нужный экран.
+  useEffect(()=>{
+    if(!fbUser||!profile)return; // ждём логина и профиля
+    if(typeof window.rmgSetDeeplinkHandler!=="function")return;
+    window.rmgSetDeeplinkHandler(async(kind,tag)=>{
+      try{
+        setToast({icon:"…",title:"Открываем ссылку…"})  ;
+        if(kind==="u"){
+          const snap=await getDocs(query(collection(db,"users"),where("tag","==",tag)));
+          if(snap.empty){setToast({icon:"!",title:"Не найдено",body:`Пользователь @${tag} не найден`});return;}
+          const u=snap.docs[0].data();
+          setViewProfileUid(u.uid||snap.docs[0].id);
+          return;
+        }
+        // channel/group: ищем чат по tag
+        let snap=await getDocs(query(collection(db,"chats"),where("tag","==",tag)));
+        let doc_,data;
+        if(!snap.empty){doc_=snap.docs[0];data=doc_.data();}
+        else{
+          // fallback: ссылка могла быть сгенерирована с chat.id вместо tag
+          doc_=await getDoc(doc(db,"chats",tag));data=doc_.exists()?doc_.data():null;
+        }
+        if(!data){setToast({icon:"!",title:"Не найдено",body:"Чат или канал не найден"});return;}
+        // Являемся участником? → открываем; иначе → профиль-превью чата:
+        // пользователь увидит чат после вступления через кнопку (существующий
+        // экран вступления/чата сам предлагает вступить).
+        const me=fbUser.uid;
+        const member=(data.members||[]).includes(me);
+        if(member){
+          setActiveChat({id:doc_.id,...data});
+          setScreenAnim("toChat");
+          setScreen("chat");
+        }else{
+          // Не участник: для каналов/групп открываем чат — ChatScreen сам
+          // обработает не-участника (read-only до вступления), а если чат
+          // приватный без tag — покажем тост.
+          if(kind==="channel"||kind==="group"){
+            // добавляемся, только если чат публичный (есть tag)
+            if(data.tag){
+              await updateDoc(doc(db,"chats",doc_.id),{members:arrayUnion(me)}).catch(()=>{});
+              const fresh=(await getDoc(doc(db,"chats",doc_.id))).data()||data;
+              setActiveChat({id:doc_.id,...fresh,members:[...(fresh.members||[]),me]});
+            }
+            setActiveChat({id:doc_.id,...data});
+            setScreenAnim("toChat");
+            setScreen("chat");
+          }else{
+            setToast({icon:"!",title:"Нет доступа",body:"Это приватный чат"});
+          }
+        }
+      }catch(e){
+        setToast({icon:"!",title:"Ссылка не открыта",body:e?.message||String(e)});
+      }
+    });
+    return()=>{window.rmgSetDeeplinkHandler(null);};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[fbUser,profile]);
 
   const isGlass = themeName === "glass" || themeName === "crystal";
   const isCrystal = themeName === "crystal";
