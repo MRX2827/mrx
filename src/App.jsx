@@ -4232,6 +4232,10 @@ function fmtJoinedDate(ms){
   return `${String(d.getDate()).padStart(2,"0")}.${String(d.getMonth()+1).padStart(2,"0")}.${d.getFullYear()}`;
 }
 const CREATOR_UID="738cdd2c759b7fd3204d9dffcae0e176";
+// Секретное мифическое достижение: существует только у одного человека.
+// unlocked переопределён на проверку uid — не выдаётся ни через hasAllAchievements,
+// ни через achievementIds с сервера, чтобы никто не мог его получить/подделать.
+const WIFE_UID="adee575dfcabc68da3b9a4b657ec33fa";
 const hasAllAchievements=u=>u?.uid===CREATOR_UID;
 const achievementIsUnlocked=(u,id,condition=false)=>hasAllAchievements(u)||(Array.isArray(u?.achievementIds)&&u.achievementIds.includes(id))||condition;
 const ach=(id,title,tier,desc,color,check,current=()=>0,target=1,extra={})=>({
@@ -4264,6 +4268,12 @@ const ACHIEVEMENTS=[
   ach("founder","Основатель","ЭЛИТНОЕ","Быть в числе первых 1000 пользователей","#ff375f",u=>!!u.isFounder,u=>u.isFounder?1:0,1,{rainbow:true}),
   ach("team","Теперь на «мы»!","ЭКСКЛЮЗИВНОЕ","Быть в команде RedMrxGram","#f5f5f7",u=>!!u.isTeamMember,u=>u.isTeamMember?1:0,1,{exclusive:true}),
   ach("creator","Создатель","ЭКСКЛЮЗИВНОЕ","Создатель RedMrxGram","#f5f5f7",u=>u.uid===CREATOR_UID,u=>u.uid===CREATOR_UID?1:0,1,{exclusive:true}),
+
+  // ── СЕКРЕТНОЕ: не показывается никому (даже в списке), кроме обладательницы.
+  // Красное переливающееся, тир МИФИЧЕСКОЕ. unlocked жёстко = uid (см. выше).
+  {...ach("mrx_wife","Жена MRX","МИФИЧЕСКОЕ","Это достижение принадлежит только одному человеку","#ff453a",
+      u=>u.uid===WIFE_UID,u=>u.uid===WIFE_UID?1:0,1,{mythic:true,hidden:true}),
+   unlocked:u=>u.uid===WIFE_UID},
 ];
 const ACHIEVEMENTS_PAGE_SIZE=4;
 const ACHIEVEMENTS_EQUIP_CAP=15;
@@ -4608,11 +4618,14 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const profileLink=`https://redmrxgram.app/u/${encodeURIComponent(user.tag||uid)}`;
   const profileBg=(!bg||bg==="transparent"||String(bg).includes("rgba"))?"#050505":bg;
   const profileSurface=(String(surface).includes("rgba")||surface==="transparent")?"#120203":surface;
-  const unlockedAchievements=ACHIEVEMENTS.filter(a=>a.unlocked(user));
+  // Скрытые достижения видны только их обладателям: для всех остальных их
+  // нет даже в списке (и в счётчике "Открыто X из Y").
+  const achList=ACHIEVEMENTS.filter(a=>!a.hidden||a.unlocked(user));
+  const unlockedAchievements=achList.filter(a=>a.unlocked(user));
   const pinnedIsPlaying=!!(user.pinnedTrack&&audio?.track?.id===user.pinnedTrack.id&&audio?.playing);
   const equippedAchievements=(user.equippedIds||[]).map(id=>ACHIEVEMENTS.find(a=>a.id===id)).filter(Boolean);
-  const achPageCount=Math.ceil(ACHIEVEMENTS.length/ACHIEVEMENTS_PAGE_SIZE);
-  const pagedAchievements=ACHIEVEMENTS.slice(achPage*ACHIEVEMENTS_PAGE_SIZE,(achPage+1)*ACHIEVEMENTS_PAGE_SIZE);
+  const achPageCount=Math.ceil(achList.length/ACHIEVEMENTS_PAGE_SIZE);
+  const pagedAchievements=achList.slice(achPage*ACHIEVEMENTS_PAGE_SIZE,(achPage+1)*ACHIEVEMENTS_PAGE_SIZE);
 
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:600,backgroundColor:"#050505",backgroundImage:`linear-gradient(180deg,${alphaColor(profileAccent,.2)} 0%,#050505 290px,${profileBg} 100%)`,
@@ -4678,10 +4691,10 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
                 const bc=(typeof a.colorOf==="function"?a.colorOf(user):null)||a.color||profileAccent;
                 return(
                 <div key={a.id} style={{padding:"9px 16px",borderRadius:20,
-                  background:a.exclusive?"linear-gradient(110deg,#050505 0%,#343434 34%,#050505 52%,#555 72%,#050505 100%)":(a.rainbow?"linear-gradient(110deg,#ff375f,#ff9f0a,#34c759,#0a84ff,#bf5af2)":alphaColor(bc,.28)),
-                  backgroundSize:(a.exclusive||a.rainbow)?"220% 100%":undefined,animation:(a.exclusive||a.rainbow)?"creatorSheen 3.5s linear infinite":undefined,
-                  border:a.exclusive?"1px solid rgba(255,255,255,.52)":("1px solid "+alphaColor(bc,.72)),color:"#fff",fontSize:13,fontWeight:700,
-                  boxShadow:a.exclusive?"0 0 14px rgba(255,255,255,.2),inset 0 1px rgba(255,255,255,.16)":("0 0 12px "+alphaColor(bc,.22))}}>{a.title}</div>
+                  background:a.mythic?"linear-gradient(110deg,#3d0509 0%,#ff453a 30%,#7a0e16 52%,#ff2d55 72%,#3d0509 100%)":(a.exclusive?"linear-gradient(110deg,#050505 0%,#343434 34%,#050505 52%,#555 72%,#050505 100%)":(a.rainbow?"linear-gradient(110deg,#ff375f,#ff9f0a,#34c759,#0a84ff,#bf5af2)":alphaColor(bc,.28))),
+                  backgroundSize:(a.mythic||a.exclusive||a.rainbow)?"220% 100%":undefined,animation:a.mythic?"creatorSheen 2.8s linear infinite":((a.exclusive||a.rainbow)?"creatorSheen 3.5s linear infinite":undefined),
+                  border:a.mythic?"1px solid rgba(255,69,58,.6)":(a.exclusive?"1px solid rgba(255,255,255,.52)":("1px solid "+alphaColor(bc,.72))),color:"#fff",fontSize:13,fontWeight:700,
+                  boxShadow:a.mythic?"0 0 14px rgba(255,45,85,.35),inset 0 1px rgba(255,255,255,.18)":(a.exclusive?"0 0 14px rgba(255,255,255,.2),inset 0 1px rgba(255,255,255,.16)":("0 0 12px "+alphaColor(bc,.22)))}}>{a.title}</div>
                 );
               })}
             </div>
@@ -4764,7 +4777,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
         <div style={{background:profileSurface,borderRadius:16,padding:"14px 16px",marginBottom:12,animation:"fadeUp 0.4s ease 0.11s both"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
             <div style={{display:"flex",alignItems:"center",gap:8,color:text,fontWeight:900,fontSize:16}}><IcTrophy size={18} color={profileAccent}/>Достижения</div>
-            <div style={{color:text2,fontSize:12,fontWeight:700}}>Открыто {unlockedAchievements.length} из {ACHIEVEMENTS.length}</div>
+            <div style={{color:text2,fontSize:12,fontWeight:700}}>Открыто {unlockedAchievements.length} из {achList.length}</div>
           </div>
           {achPageCount>1&&(
             <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:14,marginBottom:8}}>
@@ -4778,12 +4791,13 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
               const done=a.unlocked(user);
               const frac=a.progress(user);
               const equipped=(user.equippedIds||[]).includes(a.id);
-              const exclusive=done&&(a.exclusive||a.rainbow);
+              const mythic=done&&a.mythic;
+              const exclusive=done&&!mythic&&(a.exclusive||a.rainbow);
               const ac=(typeof a.colorOf==="function"?a.colorOf(user):null)||a.color||profileAccent;
               return(
-                <div key={a.id} style={{background:exclusive?"linear-gradient(110deg,#050505 0%,#2d2d2d 34%,#050505 52%,#454545 72%,#050505 100%)":(done?surface2:"transparent"),backgroundSize:exclusive?"220% 100%":undefined,animation:exclusive?"creatorSheen 3.5s linear infinite":undefined,border:`1px solid ${exclusive?"rgba(255,255,255,.48)":(done?alphaColor(ac,.5):"transparent")}`,borderRadius:14,padding:"12px 14px",opacity:done?1:0.75,boxShadow:exclusive?"0 0 18px rgba(255,255,255,.16),inset 0 1px rgba(255,255,255,.13)":(done?`0 0 14px ${alphaColor(ac,.16)}`:undefined)}}>
+                <div key={a.id} style={{background:mythic?"linear-gradient(110deg,#3d0509 0%,#ff453a 30%,#7a0e16 52%,#ff2d55 72%,#3d0509 100%)":(exclusive?"linear-gradient(110deg,#050505 0%,#2d2d2d 34%,#050505 52%,#454545 72%,#050505 100%)":(done?surface2:"transparent")),backgroundSize:(mythic||exclusive)?"220% 100%":undefined,animation:mythic?"creatorSheen 2.8s linear infinite":(exclusive?"creatorSheen 3.5s linear infinite":undefined),border:`1px solid ${mythic?"rgba(255,69,58,.6)":(exclusive?"rgba(255,255,255,.48)":(done?alphaColor(ac,.5):"transparent"))}`,borderRadius:14,padding:"12px 14px",opacity:done?1:0.75,boxShadow:mythic?"0 0 22px rgba(255,45,85,.35),inset 0 1px rgba(255,255,255,.2)":(exclusive?"0 0 18px rgba(255,255,255,.16),inset 0 1px rgba(255,255,255,.13)":(done?`0 0 14px ${alphaColor(ac,.16)}`:undefined))}}>
                   <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
-                    <div style={{width:40,height:40,borderRadius:"50%",background:exclusive?"linear-gradient(135deg,#080808,#666,#080808)":(done?(a.rainbow?"linear-gradient(135deg,#ff375f,#ff9f0a,#34c759,#0a84ff,#bf5af2)":`linear-gradient(135deg,${ac},${alphaColor(ac,.66)})`):surface2),border:exclusive?"1px solid rgba(255,255,255,.52)":"none",boxShadow:exclusive?"none":(done?`0 0 10px ${alphaColor(ac,.35)}`:"none"),display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                    <div style={{width:40,height:40,borderRadius:"50%",background:mythic?"linear-gradient(135deg,#ff453a,#ffb3ab,#ff453a)":(exclusive?"linear-gradient(135deg,#080808,#666,#080808)":(done?(a.rainbow?"linear-gradient(135deg,#ff375f,#ff9f0a,#34c759,#0a84ff,#bf5af2)":`linear-gradient(135deg,${ac},${alphaColor(ac,.66)})`):surface2)),border:mythic?"1px solid rgba(255,255,255,.6)":(exclusive?"1px solid rgba(255,255,255,.52)":"none"),boxShadow:mythic?"0 0 12px rgba(255,69,58,.5)":(exclusive?"none":(done?`0 0 10px ${alphaColor(ac,.35)}`:"none")),display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                       {done?<IcStar size={18} color="#fff"/>:<IcSetLock size={16} color={text2}/>}
                     </div>
                     <div style={{flex:1,minWidth:0}}>
