@@ -4392,7 +4392,9 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
           d.photo=bestPhoto(d.photo,pMap[uid]);
         }catch(e){}
       }
-      if(d)setUser(d);
+      // Аккаунт может быть удалён (напр., пересозданный бот) — показываем
+      // честную заглушку вместо ВЕЧНОГО спиннера (раньше зависал навсегда).
+      setUser(d||{uid,name:"Аккаунт не найден",tag:"",photo:null,notFound:true});
     });
   },[uid,myUid]);
 
@@ -9055,7 +9057,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           ):null}
           {msgs.map((m,i)=>{
             if(m.deletedFor?.[currentUser.uid]||m.deletedForAll)return null;
-            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{setInputText(cmd);setTimeout(()=>handleSend(),30);}}/>;
+            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c}).then(()=>{playSound("sent");}).catch(()=>{});}}/>;
           })}
           <div ref={bottomRef}/>
           <div ref={imeSpacerRef} style={{flexShrink:0}}/>
