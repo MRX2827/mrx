@@ -3254,7 +3254,7 @@ function VideoFullscreen({ src, fileName, videoRef: _ignored, playing: _p, setPl
 
 function FileBubble({msg,fromMe,onOpenLightbox,chatId}){
   const {accent,text2,text}=useContext(ThemeCtx);
-  const src=useMediaSrc(chatId,msg,msg.fileUrl||msg.fileData||"",msg.type==="video"?"video":msg.type==="image"?"image":"file");
+  const src=useMediaSrc(chatId,msg,msg.fileUrl||msg.videoUrl||msg.fileData||"",msg.type==="video"?"video":msg.type==="image"?"image":"file");
 
   // Оболочка файла: сохранён офлайн без загрузки (тип "Только текстовые"
   // или файл превысил лимит размера). Показываем как есть, без скачивания.
@@ -3391,7 +3391,7 @@ function ReplyInBubble({msg,fromMe}){
     :isImg?"🖼 Фото"
     :msg.type==="file"?"📎 "+(msg.fileName||"Файл")
     :msg.text||"";
-  const thumbSrc=isImg?(msg.fileData||msg.fileUrl):isCircle?(msg.videoThumb||msg.videoUrl||msg.videoData):isVideo?(msg.videoThumb||msg.fileUrl||msg.fileData):null;
+  const thumbSrc=isImg?(msg.fileData||msg.fileUrl):isCircle?(msg.videoThumb||msg.videoUrl||msg.videoData):isVideo?(msg.videoThumb||msg.fileUrl||msg.videoUrl||msg.fileData):null;
   return(
     <div style={{display:"flex",alignItems:"center",gap:6,borderLeft:`2.5px solid ${fromMe?mineSoft(0.5):accent}`,paddingLeft:7,marginBottom:6,opacity:0.88}}>
       {thumbSrc&&(
@@ -8441,7 +8441,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         if(hasReal)return prev.filter(m=>m.id!==tempId);
         return prev.map(m=>m.id===tempId?{...m,id:ref.id,_pending:false}:m);
       });
-      const preview=extra.type==="text"?extra.text:extra.type==="voice"?"🎙 Голосовое":extra.type==="circle"?"⭕ Кружок":extra.type==="sticker"?extra.text:extra.type==="image"?"🖼 Фото":extra.type==="video"?"🎬 Видео":extra.type==="audio"?"🎵 "+(extra.fileName||"Аудио"):extra.type==="file"?(extra.fileType?.startsWith("image/")?"🖼 Фото":"📎 "+extra.fileName):"";
+      const preview=extra.botCmd?"🎵 Выбор трека":extra.type==="text"?extra.text:extra.type==="voice"?"🎙 Голосовое":extra.type==="circle"?"⭕ Кружок":extra.type==="sticker"?extra.text:extra.type==="image"?"🖼 Фото":extra.type==="video"?"🎬 Видео":extra.type==="audio"?"🎵 "+(extra.fileName||"Аудио"):extra.type==="file"?(extra.fileType?.startsWith("image/")?"🖼 Фото":"📎 "+extra.fileName):"";
       const allMembers=chatData?.names?Object.keys(chatData.names):chatData?.members||chat?.members||[];
       // Атомарно увеличиваем unreadBy для каждого участника кроме отправителя.
       // increment(1) гарантирует корректный подсчёт даже при одновременной отправке
@@ -9057,7 +9057,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           ):null}
           {msgs.map((m,i)=>{
             if(m.deletedFor?.[currentUser.uid]||m.deletedForAll)return null;
-            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c}).then(()=>{playSound("sent");}).catch(()=>{});}}/>;
+            if(m.botCmd)return null; // служебная команда боту — не показываем
+            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{try{inputRef.current?.blur();}catch(e){}const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c,botCmd:true}).catch(()=>{});}}/>;
           })}
           <div ref={bottomRef}/>
           <div ref={imeSpacerRef} style={{flexShrink:0}}/>
