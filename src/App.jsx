@@ -1,5 +1,33 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, createContext, useContext, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
+
+// ── ОТЛАДКА (не убирать до стабилизации): любое не пойманное JS-падение
+// показывается ПРЯМО НА ЭКРАНЕ красным текстом вместо чёрного экрана —
+// консоль WebView на некоторых устройствах не попадает в logcat.
+const __rmgShowError=(tag)=>{
+  return (e)=>{
+    try{
+      // Плашка включается вручную: localStorage.rmg_debug_errors="1"
+      // (в CDP/консоли). По умолчанию ВЫКЛ — иначе она показывает весь
+      // старый консольный шум, который всегда был и не влияет на работу.
+      if(localStorage.getItem("rmg_debug_errors")!=="1")return;
+      const msg=(tag==="err"&&e?.message?e.message+"\n"+(e?.stack||""):"")+(tag==="rej"?(typeof e==="string"?e:JSON.stringify(e)):"");
+      const d=document.createElement("div");
+      d.textContent="⚠ "+tag+": "+msg;
+      d.style.cssText="position:fixed;left:4px;right:4px;bottom:4px;z-index:99999;background:#1a0000;color:#ff5555;font:11px/1.4 monospace;padding:8px;border:1px solid #f55;border-radius:8px;white-space:pre-wrap;word-break:break-all;max-height:60vh;overflow:auto;";
+      document.body.appendChild(d);
+    }catch(e2){}
+  };
+};
+window.addEventListener("error",__rmgShowError("err"));
+window.addEventListener("unhandledrejection",__rmgShowError("rej"));
+// Реактовский падение на уровне рендера — React 16+ кидает через window error
+const __rmgErrBoundary=class extends React.Component{
+  constructor(p){super(p);this.state={err:null};}
+  static getDerivedStateFromError(err){return {err};}
+  componentDidCatch(err,info){try{__rmgShowError("err")(err);}catch(e){}}
+  render(){return this.state.err?null:this.props.children;}
+};
 import { initDB, saveMsg, getMsgs, deleteMsg, updateMsgReactions, updateMsgText, getSetting, setSetting, clearChatMsgs, searchMsgs } from "./db.js";
 import { getCachedMediaSrc, ensureMediaDownloaded, pauseMediaDownloads, resumeMediaDownloads } from "./media.js";
 
@@ -9,12 +37,53 @@ import { getCachedMediaSrc, ensureMediaDownloaded, pauseMediaDownloads, resumeMe
 // и, если файл уже скачан на диск, подменяет src на локальный (file://…), а если
 // не скачан — тихо запускает скачивание в фоне через media.js для будущего офлайн-
 // доступа. В браузере (не Android) media.js — no-op, ничего не меняется.
+// Fade-in картинок в чате: фото МЯГКО проявляется при загрузке (0.3s), а не
+// «выстреливает» резким появлением. Плюс АНТИ-ДЁРГАНЬЕ: реальные пропорции
+// фото запоминаются по src — при повторных монтированиях рамка нужной высоты
+// рисуется СРАЗУ (лента не прыгает). После загрузки рамка ОБНОВЛЯЕТСЯ на
+// реальные пропорции (без этого рамка застревала в дефолтной 4:3 — портреты
+// кропились и лайтбокс стартовал не от видимого фото). Высота капится на
+// рамке (как раньше maxHeight на img), ошибка → рамка схлопывается.
+// Мини-аудит FadeImg: (1) при смене src стейт ok НЕ сбрасывался — фото,
+// чей первый рендер был с пустым src (useMediaSrc резолвит асинхронно),
+// получало error/флаг failed и НАВСЕГДА оставалось скрытым; (2) обёртка-div
+// ломала единообразие рамок. Теперь обёртки нет: сам <img> через CSS
+// aspect-ratio резервирует квадрат ещё ДО загрузки (работает для replaced
+// elements), fade по onLoad, кэш-гонка покрыта complete-проверкой и
+// страховкой-таймером, стейт сбрасывается при каждой смене src.
+// ФИНАЛЬНАЯ схема FadeImg: фото, УЖЕ загружавшееся в этой сессии (Set
+// _imgLoaded), монтируется СРАЗУ видимым — opacity 1, без transition: иначе
+// каждый повторный монтаж (ре-рендеры ленты, переключение экранов) заново
+// «проявлял» его от нуля — это и было возвратившееся дёргание/мигание.
+// Fade 0.3s остаётся только для по-настоящему новых фото.
+const _imgLoaded=new Set();
+// ФОТО В ЧАТАХ — финальная ПРОСТАЯ схема (после серии экспериментов с
+// aspect-ratio/обёртками/fade: все давали либо мигание, либо невидимые
+// фото, либо прыжки высоты). Теперь: обычный <img> с ЯВНОЙ пиксельной
+// высотой 260 у ВСЕХ фото (константа) — раскладка не меняется ни до,
+// ни после загрузки ни в одном WebView, размер единый у всех, кроп по
+// центру. Никаких fade — браузерный кэш сам показывает мгновенно.
+function ChatPhoto({src,fileName,onError,onClick}){
+  return <img src={src} alt={fileName||"Фото"}
+    onClick={onClick}
+    onError={onError}
+    style={{width:"100%",height:260,display:"block",objectFit:"cover"}}/>;
+}
+// Мгновенный синхронный кэш резолвов media-src: переживает ре-рендеры и
+// повторные монтирования баблов (onSnapshot при онлайне перезаписывает ленту
+// каждые пару секунд). Без него useMediaSrc на каждом монтировании начинал с
+// remote-URL и затем «переключал» на локальный — фото мигали, лента дёргалась.
+const _mediaSrcMemo=new Map();
 function useMediaSrc(chatId, msg, remote, kind) {
-  const [src,setSrc]=useState(remote);
+  remote=absMediaUrl(remote); // "/tgfile/..." → полный URL
+  const memoKey=chatId+"::"+(msg?.id||"")+"::"+remote;
+  const [src,setSrc]=useState(()=>_mediaSrcMemo.get(memoKey)||remote);
 
   useEffect(()=>{
     let cancelled=false;
-    setSrc(remote);
+    // Не откатываемся на remote, если мемо уже знает локальный src —
+    // это и убирает мигание remote→local при ре-рендерах.
+    setSrc(_mediaSrcMemo.get(memoKey)||remote);
     if(!chatId||!msg.id||!remote){
       if(remote)console.log("[media] hook skip, no chatId/msg.id:",chatId,msg.id,kind);
       return;
@@ -22,9 +91,9 @@ function useMediaSrc(chatId, msg, remote, kind) {
     (async()=>{
       const cached=await getCachedMediaSrc(chatId,msg.id);
       if(cancelled)return;
-      if(cached){console.log("[media] cache hit:",chatId,msg.id,kind);setSrc(cached);return;}
+      if(cached){console.log("[media] cache hit:",chatId,msg.id,kind);_mediaSrcMemo.set(memoKey,cached);setSrc(cached);return;}
       const local=await ensureMediaDownloaded(chatId,msg.id,remote,kind,msg.fileType||"",msg.fileSize||0);
-      if(!cancelled&&local)setSrc(local);
+      if(!cancelled&&local){_mediaSrcMemo.set(memoKey,local);setSrc(local);}
     })();
     return ()=>{cancelled=true;};
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -36,6 +105,12 @@ function useMediaSrc(chatId, msg, remote, kind) {
 // ─── Go Server ────────────────────────────────────────────────────────────────
 const SERVER_HTTP = "https://redmrxgram.duckdns.org";
 const SERVER_WS   = "wss://redmrxgram.duckdns.org";
+
+// Нормализация медиа-URL: сервер при незаданном PUBLIC_URL писал в сообщения
+// ОТНОСИТЕЛЬНЫЕ ссылки ("/tgfile/<id>") — такие в <video>/<audio> не играют.
+// Такой URL спасаем подстановкой домена. Прямые telegram-ссылки (протухают
+// ~1 час) не чиним — их file_id неизвестен.
+const absMediaUrl=(u)=>(typeof u==="string"&&u.startsWith("/"))?SERVER_HTTP+u:u;
 
 // Совместимые вызовы данных и файлов идут на собственный сервер.
 // Firebase используется отдельно для FCM, поэтому push-плагин не алиасится.
@@ -149,6 +224,15 @@ function isHiddenChat(hiddenLocal,uid,c){
   const last=(typeof c?.lastTimeMs==="number")?c.lastTimeMs:0;
   return !(last>at); // есть сообщение новее момента удаления — чат снова виден
 }
+
+// deletedFor бывает ДВУХ форм: массив (пишет arrayUnion — рабочий путь через
+// сервер) и старый объект {uid:true} (nested-поля сервер не применял, но
+// старые записи могли остаться). Читаем обе.
+const isMsgDeletedFor=(m,uid)=>{
+  const d=m?.deletedFor;
+  if(Array.isArray(d))return d.includes(uid);
+  return !!d?.[uid];
+};
 
 const directChatId=(a,b)=>[a,b].sort().join("_");
 async function ensureDirectChat(currentUser,profile,person){
@@ -917,6 +1001,9 @@ function markMsgSeen(id){
   // Подрезаем, чтобы сет не рос бесконечно за долгую сессию
   if(MSG_SEEN_IDS.size>4000){let n=0;for(const k of MSG_SEEN_IDS){MSG_SEEN_IDS.delete(k);if(++n>=1500)break;}}
 }
+// Смена чата: история нового чата при открытии снова анимируется (каскад
+// как раньше), сет «показанных» чистим.
+function clearSeenMsgs(){MSG_SEEN_IDS.clear();}
 
 // ─── Global Music Player ─────────────────────────────────────────────────────
 // ─── Global Audio Engine (singleton, survives React re-renders) ───────────────
@@ -985,8 +1072,14 @@ const AUDIO_ENGINE = {
   },
 
   _savePos(){
-    const t=this.track;
-    if(t&&this.el)this.posCache[t.id]=this.el.currentTime;
+    // БАГ-ФИКС «позиция утекает на другой трек»: между сменой this.idx (сразу)
+    // и созданием нового <audio> (асинхронно, после резолва кэша) this.track
+    // указывал на НОВЫЙ трек, а this.el — на СТАРЫЙ: _savePos в этом окне
+    // записывал позицию старой песни (30с) под id новой — новая песня
+    // стартовала с 30с. Лечение: элемент хранит id СВОЕГО трека, позиция
+    // сохраняется ТОЛЬКО под него — спаривание невозможно разъехать.
+    const tid=this.el?._rmgTrackId;
+    if(tid)this.posCache[tid]=this.el.currentTime;
     try{localStorage.setItem("rmg_audio_positions_v2",JSON.stringify(this.posCache));}catch(e){}
   },
 
@@ -1000,10 +1093,62 @@ const AUDIO_ENGINE = {
     this.idx=i;
     const t=this.track;
     if(!t){this.playing=false;this.notify();return;}
-    const a=this._buildEl(t.src);
+    this.notify(); // сразу показываем трек в мини-плеере, не ждём резолва src
+    this._startTrack(t);
+  },
+
+  // ── Локально-первое воспроизведение ──────────────────────────────────────
+  // Трек резолвится через медиа-кэш (SQLite+диск): если файл скачан — играем
+  // локально МГНОВЕННО и без сети (офлайн работает). Если нет — играем по
+  // сетевому URL как раньше, а В ФОНЕ докачиваем файл в кэш, чтобы следующий
+  // запуск был локальным. Следующий трек очереди префетчится заранее.
+  _trackSrc:new Map(), // trackId → резолвнутый src
+  async _resolveTrackSrc(t){
+    if(!t)return "";
+    const key=t.id||t.src||"";
+    if(this._trackSrc.has(key))return this._trackSrc.get(key);
+    let out=t.src||"";
+    try{
+      if(t.chatId&&t.id&&t.src){
+        const cached=await getCachedMediaSrc(t.chatId,t.id);
+        if(cached){
+          out=cached;
+          this._trackSrc.set(key,out);
+          return out;
+        }
+        // Фоновая докачка в кэш (НЕ ждём — играем по сети сейчас, локально в следующий раз)
+        ensureMediaDownloaded(t.chatId,t.id,t.src,"audio",t.mime||"",t.bytes||0).catch(()=>{});
+      }
+    }catch(e){}
+    return out;
+  },
+  _prefetchNext(){
+    try{
+      const ni=this._nextIdx();
+      if(ni===-1)return;
+      const t=this.queue[ni];
+      if(t?.chatId&&t?.id&&t?.src)ensureMediaDownloaded(t.chatId,t.id,t.src,"audio",t.mime||"",t.bytes||0).catch(()=>{});
+    }catch(e){}
+  },
+  async _startTrack(t){
+    const src=await this._resolveTrackSrc(t);
+    if(this.track!==t)return; // пока резолвили — уже ушли на другой трек
+    const a=this._buildEl(src);
+    a._rmgTrackId=t.id; // элемент знает свой трек (см. _savePos)
     const pos=this.posCache[t.id]||0;
     if(pos>2)a.currentTime=pos;
-    a.play().then(()=>{this.playing=true;this._updateMediaSession();this.notify();}).catch(()=>{this.playing=false;this.notify();});
+    // Локальный файл мог пропасть (очистка диска) — падаем на сетевой URL
+    a.onerror=()=>{
+      const key=t.id||t.src||"";
+      if(this._trackSrc.get(key)===src){
+        this._trackSrc.delete(key);
+        if(this.track===t&&!String(t.src||"").startsWith("http")){
+          const r=this._buildEl(t.src||"");
+          r.play().then(()=>{this.playing=true;this._updateMediaSession();this.notify();}).catch(()=>{});
+        }
+      }
+    };
+    a.play().then(()=>{this.playing=true;this._updateMediaSession();this.notify();this._prefetchNext();}).catch(()=>{this.playing=false;this.notify();});
     this.notify();
   },
 
@@ -1477,7 +1622,6 @@ const fmtSize=b=>b>1048576?`${(b/1048576).toFixed(1)}MB`:b>1024?`${(b/1024).toFi
 
 // ─── Стикеры (5 паков) ──────────────────────────────────────────────────────────
 const STICKER_PACKS = [
-  { name:"Смайлы", stickers:["😀","😂","🥹","😍","🤩","😎","🥳","😏","😒","😤","🤬","😭","🥺","😱","🤯","🤔","😴","🤤","🤑","😈","👻","💀","🤡","👾","🤖"] },
   { name:"Жесты", stickers:["👍","👎","👏","🙌","🤝","✌️","🤞","🤙","💪","🙏","👋","🤜","🫶","❤️","🔥","💯","✅","⭐","🎉","🎊","🎁","💎","🏆","👑","💫"] },
   { name:"Животные", stickers:["🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵","🐔","🐧","🐦","🦆","🦅","🦉","🦇","🐺","🐗","🐴"] },
   { name:"Еда", stickers:["🍕","🍔","🌮","🌯","🥙","🍜","🍣","🍱","🍦","🍩","🍪","🎂","🍰","🧁","🍫","🍭","🍬","🥤","☕","🧋","🍵","🥛","🍺","🥂","🍾"] },
@@ -1530,7 +1674,40 @@ function bestPhoto(...cands){
   return list.find(x=>x.startsWith("data:"))||list[0]||null;
 }
 
+// ── Офлайн-аватарки: резолвим через медиа-кэш (диск+SQLite) как фото/видео.
+// Ключ — хэш URL (аватарки перезаливаются → новый URL → новый ключ; старые
+// записи остаются, но их чистит общий лимит кэша). В браузере no-op.
+function avatarCacheKey(photo){
+  let h=0;
+  for(let i=0;i<photo.length;i++)h=((h*31+photo.charCodeAt(i))%1e9+1e9)%1e9;
+  return "av"+h;
+}
+function useAvatarSrc(photo){
+  const[src,setSrc]=useState(photo);
+  useEffect(()=>{
+    let cancelled=false;
+    setSrc(photo);
+    if(!photo||!photo.startsWith("http")||!window?.Capacitor?.isNativePlatform?.())return;
+    const key=avatarCacheKey(photo);
+    (async()=>{
+      try{
+        const cached=await getCachedMediaSrc("rmg_avatars",key);
+        if(cancelled)return;
+        if(cached){setSrc(cached);return;}
+        // Фоновая докачка — в списке чатов аватарка станет офлайн-доступной
+        ensureMediaDownloaded("rmg_avatars",key,photo,"image","image/jpeg",0)
+          .then(local=>{if(!cancelled&&local)setSrc(local);})
+          .catch(()=>{});
+      }catch(e){}
+    })();
+    return()=>{cancelled=true;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[photo]);
+  return src;
+}
+
 function Avatar({name,size=42,online=false,photo=null,onClick=null}){
+  const resolvedPhoto=useAvatarSrc(photo);
   const {bg}=useContext(ThemeCtx);
   const c=colorFor(name||"?");
   const[err,setErr]=useState(false);
@@ -1548,7 +1725,7 @@ function Avatar({name,size=42,online=false,photo=null,onClick=null}){
         {photo&&!err&&(
           <img
             key={photo}
-            src={photo}
+            src={resolvedPhoto}
             alt=""
             style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",
               objectFit:"cover",zIndex:1,borderRadius:"50%",display:"block",
@@ -1642,7 +1819,7 @@ function VoiceBubble({msg,fromMe,chatId}){
   return(
     <div style={{display:"flex",alignItems:"center",gap:10,minWidth:200}}>
       <button onClick={toggle} style={{width:42,height:42,borderRadius:"50%",border:"none",cursor:"pointer",background:err?"rgba(255,59,48,0.3)":fromMe?mineRgba(accent,0.2):accent,color:fromMe?contrastOn(accent):"#fff",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"transform 0.15s",transform:playing?"scale(0.88)":"scale(1)"}}>
-        {err?"✕":playing?"⏸":"▶"}
+        {err?<IcAudioClose size={18} color="#fff"/>:playing?<IcAudioPause size={18} color="#fff"/>:<IcAudioPlay size={18} color="#fff"/>}
       </button>
       <div style={{flex:1}}>
         <Waveform wf={wf} progress={prog} fromMe={fromMe}/>
@@ -1670,11 +1847,19 @@ function AudioBubble({msg,fromMe,audioMsgs,chatId}){
   // подставляем его вместо сетевого URL.
   const buildTrackFrom=(m)=>({
     id:m.id||(m.fileUrl||m.audioUrl||m.fileData||m.audioData||""),
-    src:(m.id===msg.id&&cachedSrc)?cachedSrc:(m.fileUrl||m.fileData||m.audioUrl||m.audioData||""),
+    // src для очереди берём REMOTE (fileUrl) — движок сам подставит локальный
+    // кэш через _resolveTrackSrc, если файл скачан; blob/локальный src текущего
+    // msg даём только ему (cachedSrc) для мгновенного старта.
+    src:(m.id===msg.id&&cachedSrc)?cachedSrc:absMediaUrl(m.fileUrl||m.audioUrl||m.fileData||m.audioData||""),
     name:(m.fileName||"Аудио").replace(/\.(mp3|m4a|flac|wav|aac|ogg|wma|opus|aiff|ape)$/i,""),
     ext:(m.fileName||"").split(".").pop()?.toUpperCase()||"MP3",
     size:m.fileSize?fmtSize(m.fileSize):"",
     chatName:"",author:m.author||"",
+    coverUrl:m.coverUrl||"", // обложка трека (бот присылает) — для плеера
+    // Для локально-первого воспроизведения (офлайн-кэш media.js)
+    chatId:chatId,
+    mime:m.fileType||"",
+    bytes:m.fileSize||0,
   });
   const buildTrack=()=>buildTrackFrom(msg);
 
@@ -1697,10 +1882,10 @@ function AudioBubble({msg,fromMe,audioMsgs,chatId}){
   return(
     <div style={{display:"flex",alignItems:"center",gap:10,minWidth:220,maxWidth:280}}>
       <button onClick={toggle} style={{width:46,height:46,borderRadius:"50%",border:"none",cursor:"pointer",flexShrink:0,background:fromMe?mineRgba(accent,0.22):accent,color:fromMe?contrastOn(accent):"#fff",fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.15s",transform:isPlaying?"scale(0.88)":"scale(1)"}}>
-        {isPlaying?"⏸":"▶"}
+        {isPlaying?<IcAudioPause size={20} color="#fff"/>:<IcAudioPlay size={20} color="#fff"/>}
       </button>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontSize:13,fontWeight:600,color:fromMe?contrastOn(accent):text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>🎵 {name}</div>
+        <div style={{fontSize:13,fontWeight:600,color:fromMe?contrastOn(accent):text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>{name}</div>
         <div style={{height:3,background:fromMe?mineRgba(accent,0.25):"rgba(0,0,0,0.15)",borderRadius:2,overflow:"hidden",marginBottom:4}}>
           <div style={{height:"100%",width:(progress*100)+"%",background:fromMe?mineRgba(accent,0.85):accent,borderRadius:2,transition:"width 0.1s linear"}}/>
         </div>
@@ -1910,7 +2095,7 @@ function AudioPlayer({msg,fromMe}){
           <button onClick={toggle} style={{position:"absolute",inset:0,borderRadius:12,border:"none",cursor:"pointer",
             background:isPlaying?"rgba(0,0,0,0.4)":"rgba(0,0,0,0.25)",color:"#fff",fontSize:14,
             display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.15s",WebkitTapHighlightColor:"transparent"}}>
-            {isPlaying?"⏸":"▶"}
+            {isPlaying?<IcAudioPause size={22} color="#fff"/>:<IcAudioPlay size={22} color="#fff"/>}
           </button>
         </div>
         <div style={{flex:1,minWidth:0}}>
@@ -2061,6 +2246,35 @@ const IcCalendarSm=_ic("M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2
 
 let _appConfirmShow=null;
 const appConfirm=(msg,okLabel="Да")=>new Promise(res=>{if(_appConfirmShow)_appConfirmShow({msg,okLabel,res});else res(window.confirm(msg));});
+// Глобальный prompt с полем ввода (по образцу appConfirm) — для ввода имени
+// контакта и других будущих мест. Возвращает строку или null (отмена).
+let _appPromptShow=null;
+const appPrompt=(msg,defaultValue="",okLabel="Сохранить")=>new Promise(res=>{if(_appPromptShow)_appPromptShow({msg,defaultValue,okLabel,res});else{const v=window.prompt(msg,defaultValue);res(v===null?null:v);}});
+function PromptHost(){
+  const theme=useContext(ThemeCtx)||{};
+  const[st,setSt]=useState(null);
+  const[vis,setVis]=useState(false);
+  const[val,setVal]=useState("");
+  const inputRef=useRef(null);
+  useEffect(()=>{_appPromptShow=(c)=>{setSt(c);setVal(c.defaultValue||"");requestAnimationFrame(()=>requestAnimationFrame(()=>setVis(true)));};return()=>{_appPromptShow=null;};},[]);
+  useEffect(()=>{if(vis&&inputRef.current){inputRef.current.focus();try{inputRef.current.select();}catch(e){}}},[vis]);
+  if(!st)return null;
+  const done=(v)=>{setVis(false);setTimeout(()=>{st.res(v);setSt(null);},200);};
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",background:vis?"rgba(0,0,0,0.55)":"rgba(0,0,0,0)",transition:"background 0.2s ease",padding:24}} onClick={()=>done(null)}>
+      <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:320,background:theme.surface||"#1c1c1e",border:`1px solid ${theme.border||"#333"}`,borderRadius:18,padding:"20px 18px 14px",boxShadow:"0 18px 60px rgba(0,0,0,0.6)",transform:vis?"scale(1)":"scale(0.86)",opacity:vis?1:0,transition:"transform 0.22s cubic-bezier(0.34,1.56,0.64,1),opacity 0.18s ease"}}>
+        <div style={{color:theme.text||"#fff",fontSize:15,fontWeight:600,lineHeight:1.45,textAlign:"center",marginBottom:12}}>{st.msg}</div>
+        <input ref={inputRef} value={val} onChange={e=>setVal(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter")done(val.trim()||st.defaultValue||null);}}
+          style={{width:"100%",boxSizing:"border-box",background:theme.surface2||"#2a2a2c",border:`1.5px solid ${theme.border||"#333"}`,borderRadius:12,padding:"11px 12px",color:theme.text||"#fff",fontSize:14,outline:"none",fontFamily:"inherit",marginBottom:14}}/>
+        <div style={{display:"flex",gap:10}}>
+          <button className="rmg-press" onClick={()=>done(null)} style={{flex:1,padding:"11px 0",borderRadius:12,border:`1px solid ${theme.border||"#333"}`,background:theme.surface2||"#2a2a2c",color:theme.text2||"#aaa",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Отмена</button>
+          <button className="rmg-press" onClick={()=>done(val.trim()||st.defaultValue||null)} style={{flex:1,padding:"11px 0",borderRadius:12,border:"none",background:"#e53935",color:"#fff",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{st.okLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function ConfirmHost(){
   const theme=useContext(ThemeCtx)||{};
   const[st,setSt]=useState(null);
@@ -2105,6 +2319,33 @@ let _videoFullscreenClose = null;
 // просмотр изображения (с обратной анимацией), а не выходит из чата.
 let _lightboxClose = null;
 let _chatBackHandler = null;
+// Плавное закрытие контекстного меню сообщения через жест «Назад»
+let _ctxMenuClose = null;
+// Назад в чат-листе: закрывает контекстное меню чата / FAB-панель (жест «Назад»
+// раньше просто сворачивал приложение, минуя эти оверлеи)
+let _chatListBackHandler = null;
+// Назад в предпросмотре истории (композер StoriesBar): закрывает его, а не приложение
+let _storyComposerClose = null;
+// Мгновенная память лент чатов: chatId → последние msgs. При повторном заходе
+// в чат лента показывается СРАЗУ (без спиннера загрузки) — раньше каждый
+// ре-монт ChatScreen начинался с пустого msgsReady=false, и спиннер «возвращался».
+const _chatMsgsMemo=new Map();
+// ── Фоновый префетч чатов (как в Telegram): после загрузки списка чатов
+// тихо тянем последние ~20 сообщений каждого чата (REST, без подписок) в
+// память + SQLite. Любой чат открывается мгновенно даже после перезапуска.
+// Очередь последовательная с паузами — сервер слабый (512 МБ), не душим его.
+const _prefetchedChats=new Set();
+async function prefetchChat(chatId){
+  if(!chatId||_prefetchedChats.has(chatId))return;
+  _prefetchedChats.add(chatId);
+  try{
+    const snap=await getDocs(query(collection(db,"chats",chatId,"messages"),orderBy("createdAt","asc"),limitToLast(20)));
+    const list=snap.docs.map(d=>({id:d.id,...d.data()}));
+    if(!list.length)return;
+    _chatMsgsMemo.set(chatId,list);
+    for(const m of list){try{await saveMsg({...m,chatId});}catch(e){}}
+  }catch(e){_prefetchedChats.delete(chatId);} // сбой — можно повторить позже
+}
 
 // ── Плавная клавиатура (IME): «док поверх списка» (финальная схема) ──────────
 // Корень чата НИКОГДА не меняет размеры (нет paddingBottom) → сообщения
@@ -2121,6 +2362,7 @@ window.__rmgImeHasDock=()=>!!_imeR.dock; // нативный слой спраш
 window.__rmgImeFrame=(h,sys)=>{
   const pad=Math.max(0,(h||0)-(sys||0));
   window.__rmgImeMoving=true;
+  window.__rmgImeH=h||0; // высота клавиатуры в CSS-px — модалки с инпутами читают её
   if(!_imeR.dock)return;
   // «У низа?» и высоту дока захватываем ОДИН раз за анимацию.
   if(_imeNear===null){
@@ -2135,6 +2377,7 @@ window.__rmgImeFrame=(h,sys)=>{
 window.__rmgImeSettle=(h,sys)=>{
   const pad=Math.max(0,(h||0)-(sys||0));
   window.__rmgImeMoving=false;
+  window.__rmgImeH=h||0;
   if(_imeR.dock){
     _imeDockH=_imeR.dock.offsetHeight||0;
     _imePad=pad;
@@ -2631,7 +2874,7 @@ function VideoPlayer({ src, fileName, fromMe, onOpenLightbox }) {
               padding: "4px 8px", borderRadius: 8,
               display: "inline-flex", alignItems: "center", justifyContent:"center",
               fontSize: 12, fontWeight: 700, fontFamily: "inherit", marginRight: 6,
-            }}>⬇</button>
+            }}><IcSetDownload size={14} color="rgba(255,255,255,0.85)"/></button>
           {/* Fullscreen button */}
           <button onClick={e => { e.stopPropagation(); setFullscreen(true); }}
             style={{
@@ -3367,8 +3610,7 @@ function FileBubble({msg,fromMe,onOpenLightbox,chatId}){
         if(onOpenLightbox)onOpenLightbox({src,fileName:msg.fileName,fileType:msg.fileType||"image/jpeg",originRect});
         else window.open(src,"_blank");
       }}>
-      <img src={src} alt={msg.fileName||"Фото"}
-        style={{width:"100%",display:"block",maxHeight:320,objectFit:"cover"}}
+      <ChatPhoto src={src} fileName={msg.fileName||"Фото"}
         onError={e=>{e.target.style.display="none";}}/>
     </div>
   );
@@ -3811,6 +4053,8 @@ function EmojiPanel({open, onEmoji, onSticker, onClose}){
 
 // ─── Group Members Modal ────────────────────────────────────────────────────
 function GroupMembersModal({chat,currentUser,onClose,showToast}){
+  const [closing,setClosing]=useState(false);
+  const doClose=()=>{if(closing)return;setClosing(true);setTimeout(onClose,300);};
   const {surface,border,text,text2,accent}=useContext(ThemeCtx);
   const[members,setMembers]=useState([]);
   useEffect(()=>{
@@ -3832,13 +4076,13 @@ function GroupMembersModal({chat,currentUser,onClose,showToast}){
     }catch(e){showToast?.({icon:"!",title:"Ошибка",body:e?.message});}
   };
   return(
-    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",alignItems:"flex-end"}} onClick={onClose}>
-      <div style={{background:surface,borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"70vh",display:"flex",flexDirection:"column",animation:"slideUp 0.3s ease"}} onClick={e=>e.stopPropagation()}>
+    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",alignItems:"flex-end",animation:closing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={doClose}>
+      <div style={{background:surface,borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"70vh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
         <div style={{padding:"10px 16px 8px",borderBottom:`1px solid ${border}`}}>
           <div style={{width:36,height:4,background:border,borderRadius:2,margin:"0 auto 10px"}}/>
-          <div style={{color:text,fontWeight:700,fontSize:16}}>👥 Участники ({members.length})</div>
+          <div style={{color:text,fontWeight:700,fontSize:16,display:"flex",alignItems:"center",gap:8}}><IcTabGroups size={18} color={accent}/>Участники ({members.length})</div>
         </div>
-        <div style={{overflowY:"auto",padding:"6px 0"}}>
+        <div style={{overflowY:"auto",padding:"6px 0",flex:1,minHeight:0}}>
           {members.map(m=>(
             <div key={m.uid} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 16px"}}>
               <Avatar name={m.name} size={44} photo={m.photo}/>
@@ -3861,6 +4105,20 @@ function GroupMembersModal({chat,currentUser,onClose,showToast}){
 function AddMembersModal({chat,currentUser,onClose}){
   const {surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const[q,setQ]=useState(""),[ results,setResults]=useState([]),[ added,setAdded]=useState([]),[ members,setMembers]=useState(chat.members||[]),[ loading,setLoading]=useState(false);
+  // Панель поднимается НАД клавиатурой (adjustNothing): слушаем высоту IME
+  // из нативного моста (__rmgImeH, обновляется на каждый кадр/settle) —
+  // иначе клавиатура перекрывала инпут и не было видно, что печатаешь.
+  const[imeH,setImeH]=useState(0);
+  const[closing,setClosing]=useState(false);
+  const imeTick=useRef(0);
+  useEffect(()=>{
+    const id=setInterval(()=>{
+      const h=Math.round(window.__rmgImeH||0);
+      if(h!==imeTick.current){imeTick.current=h;setImeH(h);}
+    },80);
+    return()=>clearInterval(id);
+  },[]);
+  const doClose=()=>{if(closing)return;setClosing(true);setTimeout(onClose,300);};
   const search=async()=>{
     if(!q.trim())return;setLoading(true);
     const clean=q.trim().replace(/^@/,"").toLowerCase();
@@ -3882,10 +4140,10 @@ function AddMembersModal({chat,currentUser,onClose}){
     catch(e){alert("Ошибка: "+e.message);}
   };
   return(
-    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.75)",zIndex:500,display:"flex",alignItems:"flex-end",animation:"fadeIn 0.2s ease"}} onClick={onClose}>
-      <div style={{background:surface,borderRadius:"24px 24px 0 0",padding:24,width:"100%",maxHeight:"75dvh",display:"flex",flexDirection:"column",animation:"slideUp 0.3s cubic-bezier(0.34,1.56,0.64,1)"}} onClick={e=>e.stopPropagation()}>
+    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.75)",zIndex:500,display:"flex",alignItems:"flex-end",animation:closing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={doClose}>
+      <div style={{background:surface,borderRadius:"24px 24px 0 0",padding:24,width:"100%",maxHeight:"75dvh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)",transform:imeH?`translateY(${-imeH}px)`:"none",transition:"transform 0.25s cubic-bezier(0.22,1,0.36,1)",boxShadow:imeH?"0 -12px 40px rgba(0,0,0,0.55)":"none"}} onClick={e=>e.stopPropagation()}>
         <div style={{width:36,height:4,background:border,borderRadius:2,margin:"0 auto 18px"}}/>
-        <div style={{color:text,fontWeight:700,fontSize:17,marginBottom:14}}>👥 Добавить участников</div>
+        <div style={{color:text,fontWeight:700,fontSize:17,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><IcTabGroups size={18} color={accent}/>Добавить участников</div>
         <div style={{display:"flex",gap:8,marginBottom:14}}>
           <input value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()} placeholder="@тег или имя" autoFocus style={{flex:1,background:surface2,border:`1.5px solid ${border}`,borderRadius:14,padding:"12px 14px",color:text,fontSize:14,outline:"none",fontFamily:"inherit"}}/>
           <button onClick={search} style={{padding:"0 16px",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",borderRadius:14,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Найти</button>
@@ -3902,7 +4160,7 @@ function AddMembersModal({chat,currentUser,onClose}){
             </div>
           );})}
         </div>
-        <button onClick={onClose} style={{marginTop:14,padding:13,background:surface2,border:"none",borderRadius:14,color:text2,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Закрыть</button>
+        <button onClick={doClose} style={{marginTop:14,padding:13,background:surface2,border:"none",borderRadius:14,color:text2,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>Закрыть</button>
       </div>
     </div>
   );
@@ -3922,6 +4180,9 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
   const[showViews,setShowViews]=useState(false);
   const[showLikes,setShowLikes]=useState(false);
   const[showActions,setShowActions]=useState(false);
+  const[actionsClosing,setActionsClosing]=useState(false);
+  // Плавное закрытие меню историй (три точки): sheetDown → unmount
+  const closeActions=()=>{if(actionsClosing)return;setActionsClosing(true);setTimeout(()=>{setShowActions(false);setActionsClosing(false);},260);};
   const[actionBusy,setActionBusy]=useState(false);
   const[confirmDelete,setConfirmDelete]=useState(false);
   const[closing,setClosing]=useState(false);
@@ -4201,11 +4462,11 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
         </div>
       )}
       {showActions&&(
-        <div data-story-control="1" onClick={e=>{e.stopPropagation();setShowActions(false);}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.42)",display:"flex",alignItems:"flex-end",zIndex:2}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:"rgba(18,18,18,.94)",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",borderRadius:"22px 22px 0 0",borderTop:"1px solid rgba(255,255,255,.12)",padding:"10px 12px max(env(safe-area-inset-bottom,18px),18px)",animation:"sheetUp .22s cubic-bezier(.22,.61,.36,1)"}}>
+        <div data-story-control="1" onClick={e=>{e.stopPropagation();closeActions();}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.42)",display:"flex",alignItems:"flex-end",zIndex:2,animation:actionsClosing?"fadeOutQ 0.26s ease forwards":"fadeInQ 0.22s ease"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:"rgba(18,18,18,.94)",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",borderRadius:"22px 22px 0 0",borderTop:"1px solid rgba(255,255,255,.12)",padding:"10px 12px max(env(safe-area-inset-bottom,18px),18px)",animation:actionsClosing?"sheetDownQ 0.26s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ .28s cubic-bezier(0.22,1,0.36,1)"}}>
             <div style={{width:42,height:4,borderRadius:3,background:"rgba(255,255,255,.22)",margin:"0 auto 10px"}}/>
             <button onClick={downloadStory} disabled={actionBusy} style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"14px 12px",background:"transparent",border:"none",borderBottom:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:15,fontWeight:700,fontFamily:"inherit",opacity:actionBusy?0.7:1}}>
-              <span style={{width:26,textAlign:"center"}}>⬇</span> Скачать
+              <span style={{width:26,textAlign:"center",display:"inline-flex",alignItems:"center",justifyContent:"center"}}><IcSetDownload size={18} color="#fff"/></span> Скачать
             </button>
             {mine&&(
               <button onClick={()=>{setShowActions(false);setConfirmDelete(true);}} disabled={actionBusy} style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"14px 12px",background:"transparent",border:"none",borderBottom:"1px solid rgba(255,255,255,.08)",color:"#FF5A5F",fontSize:15,fontWeight:800,fontFamily:"inherit",opacity:actionBusy?0.7:1}}>
@@ -4289,24 +4550,43 @@ function StoriesBar({currentUser,profile}){
     return arr;
   },[stories,currentUser.uid]);
 
-  const publish=async(e)=>{
+  // ── Редактор истории: сначала превью, потом публикация ───────────────────
+  const[composer,setComposer]=useState(null); // {file,url,isVideo}
+  const[composerClosing,setComposerClosing]=useState(false);
+  const pickStoryFile=(e)=>{
     const file=e.target.files?.[0];
     e.target.value="";
     if(!file)return;
     const isVideo=file.type.startsWith("video/");
     const isImage=file.type.startsWith("image/");
-    if(!isVideo&&!isImage){alert("Можно загрузить фото или видео");return;}
+    if(!isVideo&&!isImage){showToastLike("Можно выбрать фото или видео");return;}
+    setComposer({file,url:URL.createObjectURL(file),isVideo});
+  };
+  const closeComposer=()=>{if(composer){try{URL.revokeObjectURL(composer.url);}catch(e){}}
+    setComposerClosing(true);setTimeout(()=>{setComposer(null);setComposerClosing(false);},280);};
+  // Жест «Назад» закрывает предпросмотр истории, а не сворачивает приложение.
+  // КРИТИЧНО: хендлер активен ТОЛЬКО при открытом композере (иначе он
+  // перехватывал и ПРОГЛАТЫВАЛ все жесты «Назад» по всему приложению).
+  useEffect(()=>{
+    _storyComposerClose=composer?()=>{closeComposer();}:null;
+    return()=>{_storyComposerClose=null;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[composer,composerClosing]);
+  const[toastMsg,setToastMsg]=useState(null);
+  const showToastLike=(t)=>{setToastMsg(t);setTimeout(()=>setToastMsg(null),2200);};
+  const publishStory=async()=>{
+    if(!composer)return;
     setUploading(true);
     try{
-      const mediaUrl=await uploadFileToFirebase(file,`stories/${currentUser.uid}`);
-      const videoThumb=isVideo?await createVideoPoster(file):"";
+      const mediaUrl=await uploadFileToFirebase(composer.file,`stories/${currentUser.uid}`);
+      const videoThumb=composer.isVideo?await createVideoPoster(composer.file):"";
       const now=Date.now();
       await addDoc(collection(db,"stories"),{
         uid:currentUser.uid,
         author:profile?.name||currentUser.displayName||"RedMrx",
         authorPhoto:profile?.photo||"",
         mediaUrl,
-        mediaType:isVideo?"video":"image",
+        mediaType:composer.isVideo?"video":"image",
         videoThumb,
         createdAt:serverTimestamp(),
         createdAtMs:now,
@@ -4315,14 +4595,15 @@ function StoriesBar({currentUser,profile}){
         viewCount:0,
         likeCount:0,
       });
+      closeComposer();
     }catch(err){
-      alert("Story upload failed in Firebase Storage. "+(err?.message||err));
+      showToastLike("Ошибка загрузки: "+(err?.message||err));
     }finally{setUploading(false);}
   };
 
   return(
     <div style={{background:surface,borderBottom:`1px solid ${border}`,padding:"9px 10px 10px",overflowX:"auto",display:"flex",gap:12,flexShrink:0}}>
-      <input ref={fileRef} type="file" accept="image/*,video/*" onChange={publish} style={{display:"none"}}/>
+      <input ref={fileRef} type="file" accept="image/*,video/*" onChange={pickStoryFile} style={{display:"none"}}/>
       <button onClick={()=>fileRef.current?.click()} disabled={uploading} style={{width:70,flex:"0 0 70px",background:"none",border:"none",padding:0,cursor:uploading?"default":"pointer",fontFamily:"inherit"}}>
         <div style={{position:"relative",width:58,height:58,margin:"0 auto 5px",borderRadius:"50%",padding:2,background:`linear-gradient(135deg,${accent},${accent2})`,overflow:"visible"}}>
           <Avatar name={profile?.name||"?"} photo={profile?.photo} size={54}/>
@@ -4339,6 +4620,35 @@ function StoriesBar({currentUser,profile}){
         </button>
       ))}
       {viewer&&<StoryViewer items={viewer.items} startIndex={viewer.startIndex} currentUser={currentUser} profile={profile} onClose={()=>setViewer(null)}/>}
+      {/* ── Редактор истории: превью → «Опубликовать» ── */}
+      {composer&&createPortal(
+        <div style={{position:"fixed",inset:0,zIndex:900,background:"rgba(0,0,0,0.92)",display:"flex",flexDirection:"column",animation:composerClosing?"fadeOutQ 0.28s ease forwards":"fadeInQ 0.25s ease"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"max(env(safe-area-inset-top,18px),18px) 18px 10px"}}>
+            <button onClick={closeComposer} style={{background:"rgba(255,255,255,0.12)",border:"none",width:40,height:40,borderRadius:"50%",color:"#fff",fontSize:18,cursor:"pointer"}}>✕</button>
+            <div style={{color:"#fff",fontWeight:800,fontSize:15}}>Новая история</div>
+            <div style={{width:40}}/>
+          </div>
+          <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:12,overflow:"hidden"}}>
+            {composer.isVideo
+              ?<video src={composer.url} loop autoPlay playsInline style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}/>
+              :<img src={composer.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}/>}
+          </div>
+          <div style={{padding:"14px 18px max(env(safe-area-inset-bottom,18px),18px)",display:"flex",flexDirection:"column",gap:10,animation:"slideUp 0.3s ease"}}>
+            <div style={{color:"rgba(255,255,255,0.55)",fontSize:12,textAlign:"center"}}>
+              История увидят твои контакты · исчезнет через 24 часа
+            </div>
+            <button onClick={publishStory} disabled={uploading} style={{width:"100%",padding:15,border:"none",borderRadius:16,background:uploading?"rgba(255,255,255,0.15)":`linear-gradient(135deg,${accent},${accent2})`,color:"#fff",fontWeight:900,fontSize:15,fontFamily:"inherit",cursor:uploading?"default":"pointer",opacity:uploading?0.7:1,transition:"opacity 0.2s"}}>
+              {uploading?"Публикуем…":"Опубликовать"}
+            </button>
+            <button onClick={closeComposer} disabled={uploading} style={{width:"100%",padding:13,border:"none",borderRadius:16,background:"rgba(255,255,255,0.08)",color:"rgba(255,255,255,0.7)",fontWeight:700,fontSize:14,fontFamily:"inherit",cursor:uploading?"default":"pointer"}}>Отмена</button>
+          </div>
+        </div>,
+        document.body
+      )}
+      {toastMsg&&createPortal(
+        <div style={{position:"fixed",top:"max(env(safe-area-inset-top,16px),16px)",left:"50%",transform:"translateX(-50%)",zIndex:999,background:"rgba(20,20,20,0.95)",color:"#fff",padding:"10px 18px",borderRadius:14,fontSize:13,fontWeight:600,boxShadow:"0 6px 24px rgba(0,0,0,0.4)",animation:"toastIn 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>{toastMsg}</div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -4406,6 +4716,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const[user,setUser]=useState(null);
   const[blocked,setBlocked]=useState(false);
   const[showMenu,setShowMenu]=useState(false);
+  const[menuClosing,setMenuClosing]=useState(false);
+  const closeProfileMenu=()=>{if(menuClosing)return;setMenuClosing(true);setTimeout(()=>{setShowMenu(false);setMenuClosing(false);},200);};
   const[imgVisible,setImgVisible]=useState(false);
   const[contactAdded,setContactAdded]=useState(false);
   const[profileTone,setProfileTone]=useState(null);
@@ -4516,7 +4828,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
     const chatId=[myUid,uid].sort().join("_");
     try{
       const msgs=await getDocs(collection(db,"chats",chatId,"messages"));
-      await Promise.all(msgs.docs.map(d=>updateDoc(doc(db,"chats",chatId,"messages",d.id),{deletedFor:{[myUid]:true}})));
+      await Promise.all(msgs.docs.map(d=>updateDoc(doc(db,"chats",chatId,"messages",d.id),{deletedFor:arrayUnion(myUid)})));
+      try{await clearChatMsgs(chatId);}catch(e2){}
     }catch(e){}
   };
 
@@ -4528,7 +4841,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
       if(blocked){await updateDoc(userRef,{blocked:list.filter(id=>id!==uid)});setBlocked(false);}
       else{await updateDoc(userRef,{blocked:[...list,uid]});setBlocked(true);}
     }catch(e){}
-    setShowMenu(false);
+    closeProfileMenu();
   };
 
   const downloadAvatar=async()=>{
@@ -4538,10 +4851,13 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
 
   const addProfileContact=async()=>{
     if(!user||uid===myUid||contactAdded)return;
+    // Имя под которым СОХРАНИТЬ контакт — спрашиваем, дефолт = имя профиля
+    const customName=await appPrompt("Сохранить контакт как:",user.name||user.tag||"","Сохранить");
+    if(customName===null)return; // отмена
     try{
       await setDoc(doc(db,"users",myUid,"contacts",uid),{
         uid,
-        name:user.name||"",
+        name:customName,
         tag:user.tag||"",
         photo:user.photo||"",
         createdAt:serverTimestamp()
@@ -4758,7 +5074,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
       animation:closing?"profileOut .24s cubic-bezier(0.4,0,0.2,1) forwards":"pageSlideIn 0.3s cubic-bezier(0.25,0.46,0.45,0.94)",
       WebkitAnimation:closing?"profileOut .24s cubic-bezier(0.4,0,0.2,1) forwards":"pageSlideIn 0.3s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
 
-      {showMenu&&<div onClick={()=>setShowMenu(false)} style={{position:"fixed",inset:0,zIndex:39,background:"transparent"}}/>}
+      {showMenu&&<div onClick={closeProfileMenu} style={{position:"fixed",inset:0,zIndex:39,background:"transparent"}}/>}
       <input ref={avatarFileRef} type="file" accept="image/*" onChange={pickAvatar} style={{display:"none"}}/>
       <input ref={bgFileRef} type="file" accept="image/*" onChange={pickBg} style={{display:"none"}}/>
 
@@ -4784,7 +5100,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
             <div style={{position:"relative"}}>
               <button onClick={e=>{e.stopPropagation();setShowMenu(m=>!m);}} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}><IcMoreH size={22}/></button>
               {showMenu&&(
-                <div style={{position:"absolute",top:58,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",zIndex:41,overflow:"hidden"}} onClick={e=>e.stopPropagation()}>
+                <div style={{position:"absolute",top:58,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",zIndex:41,overflow:"hidden",animation:menuClosing?"menuFadeQ 0.2s ease forwards":"menuPopQ 0.24s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
                   {hasPhoto&&<button onClick={downloadAvatar} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}><IcSetDownload size={17}/>Скачать фото</button>}
                   <button onClick={clearChat} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:text,fontSize:14,borderBottom:`1px solid ${border}`}}><IcTrash size={17}/>Очистить чат</button>
                   <button onClick={toggleBlock} style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 16px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",color:"#FF3B30",fontSize:14}}><IcSetLock size={17} color="#FF3B30"/>{blocked?"Разблокировать":"Заблокировать"}</button>
@@ -4795,8 +5111,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
         </div>
         <div style={{position:"relative",zIndex:2,display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
           <button onClick={()=>profileStories.length&&setProfileViewer({items:profileStories,startIndex:0})} style={{position:"relative",background:"transparent",border:"none",padding:0,cursor:profileStories.length?"pointer":"default",fontFamily:"inherit"}}>
-            <div style={{width:116,height:116,borderRadius:"50%",padding:profileStories.length?3:0,background:profileStories.length?`linear-gradient(135deg,${profileAccent},${accent2})`:"transparent"}}>
-              <Avatar name={user.name||"?"} photo={user.photo} size={116}/>
+            <div style={{width:116,height:116,borderRadius:"50%",padding:profileStories.length?3:0,background:profileStories.length?`linear-gradient(135deg,${profileAccent},${accent2})`:"transparent",display:"flex",alignItems:"center",justifyContent:"center",boxSizing:"border-box"}}>
+              <Avatar name={user.name||"?"} photo={user.photo} size={profileStories.length?110:116}/>
             </div>
             {profileStories.length>0&&<div style={{position:"absolute",right:4,bottom:5,width:26,height:26,borderRadius:"50%",background:accent,color:"#fff",border:`3px solid #050505`,display:"flex",alignItems:"center",justifyContent:"center"}}><IcAddCircle size={16} color="#fff"/></div>}
           </button>
@@ -5020,6 +5336,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
 
 
 function FindPeople({currentUser,profile,onClose,onStartChat}){
+  const[closing,setClosing]=useState(false);
+  const doClose=()=>{if(closing)return;setClosing(true);setTimeout(onClose,250);};
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const[q,setQ]=useState(""),[ results,setResults]=useState([]),[ loading,setLoading]=useState(false),[ searched,setSearched]=useState(false);
   const[contacts,setContacts]=useState([]);
@@ -5048,16 +5366,19 @@ function FindPeople({currentUser,profile,onClose,onStartChat}){
   };
   const addContact=async(person)=>{
     if(!person?.uid)return;
+    // Имя под которым сохранить — спрашиваем, дефолт = имя человека
+    const customName=await appPrompt("Сохранить контакт как:",person.name||person.tag||"","Сохранить");
+    if(customName===null)return; // отмена
     await setDoc(doc(db,"users",currentUser.uid,"contacts",person.uid),{
-      uid:person.uid,name:person.name||"",tag:person.tag||"",photo:person.photo||"",createdAt:serverTimestamp()
+      uid:person.uid,name:customName,tag:person.tag||"",photo:person.photo||"",createdAt:serverTimestamp()
     },{merge:true});
   };
   return(
-    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",zIndex:100,display:"flex",flexDirection:"column",overflowY:"auto"}}>
+    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",zIndex:100,display:"flex",flexDirection:"column",overflowY:"auto",animation:closing?"screenOutQ 0.25s ease forwards":"screenInQ 0.28s cubic-bezier(0.22,1,0.36,1)"}}>
       <div style={{background:bg,height:"100vh",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"13px 15px",background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:11}}>
-          <button onClick={onClose} style={{background:"none",border:"none",color:accent,fontSize:22,cursor:"pointer"}}>←</button>
-          <div style={{color:text,fontWeight:700,fontSize:16}}>🔍 Найти людей</div>
+          <button onClick={doClose} style={{background:"none",border:"none",color:accent,fontSize:22,cursor:"pointer"}}>←</button>
+          <div style={{color:text,fontWeight:700,fontSize:16,display:"flex",alignItems:"center",gap:8}}><IcSearchSm size={18} color={accent}/>Найти людей</div>
         </div>
         <div style={{padding:14,flexShrink:0}}>
           <div style={{display:"flex",alignItems:"center",background:surface2,border:`1.5px solid ${border}`,borderRadius:15,overflow:"hidden"}}>
@@ -5068,7 +5389,7 @@ function FindPeople({currentUser,profile,onClose,onStartChat}){
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"0 14px"}}>
           {loading&&<div style={{textAlign:"center",color:text2,padding:40}}>🔍</div>}
-          {searched&&!loading&&!results.length&&<div style={{textAlign:"center",padding:40}}><div style={{fontSize:46,marginBottom:10}}>🔍</div><div style={{color:text2}}>Никого не найдено</div></div>}
+          {searched&&!loading&&!results.length&&<div style={{textAlign:"center",padding:40}}><div style={{marginBottom:10,display:"flex",justifyContent:"center"}}><IcSearchSm size={46} color={text2}/></div><div style={{color:text2}}>Никого не найдено</div></div>}
           {results.map((p,i)=>(
             <div key={p.uid} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:`1px solid ${border}`,animation:`msgIn 0.2s ease ${i*0.05}s both`}}>
               <Avatar name={p.name} size={50} photo={p.photo}/>
@@ -5153,7 +5474,7 @@ function ContactsTab({currentUser,profile,search="",onOpen,onViewProfile,onFind}
   if(!filtered.length){
     return(
       <div style={{height:"60%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",textAlign:"center",padding:24}}>
-        <div style={{fontSize:48,opacity:.35,marginBottom:12}}>👥</div>
+        <div style={{opacity:.35,marginBottom:12,display:"flex",justifyContent:"center"}}><IcTabContacts size={48} color={text2}/></div>
         <div style={{color:text,fontWeight:800,fontSize:16}}>Контактов пока нет</div>
         <div style={{color:text2,fontSize:13,lineHeight:1.45,marginTop:6,maxWidth:260}}>
           Добавляй людей в контакты, чтобы быстрее писать им и давать доступ к историям.
@@ -5576,7 +5897,7 @@ function MsgSearch({chatId,onClose,onJump}){
       </div>
       <div style={{flex:1,overflowY:"auto",padding:"8px 12px"}}>
         {loading&&<div style={{textAlign:"center",padding:30,color:text2}}>🔍 Поиск...</div>}
-        {!loading&&results.length===0&&q&&<div style={{textAlign:"center",padding:30}}><div style={{fontSize:40,marginBottom:8}}>🔍</div><div style={{color:text2}}>Ничего не найдено</div></div>}
+        {!loading&&results.length===0&&q&&<div style={{textAlign:"center",padding:30}}><div style={{marginBottom:8,display:"flex",justifyContent:"center"}}><IcSearchSm size={40} color={text2}/></div><div style={{color:text2}}>Ничего не найдено</div></div>}
         {results.map(m=>(
           <div key={m.id} onClick={()=>{onJump(m.id);onClose();}} style={{padding:"10px 12px",borderBottom:`1px solid ${border}`,cursor:"pointer",borderRadius:10,marginBottom:2,transition:"background 0.15s"}}
             onTouchStart={e=>e.currentTarget.style.background=surface2} onTouchEnd={e=>e.currentTarget.style.background="none"}>
@@ -5903,6 +6224,15 @@ function MsgContextMenu({msg,myUid,chatId,onClose,onReply,onEdit,onForward,onSav
     setTimeout(onClose,280);
   };
 
+  // Жест «Назад» закрывает ПЛАВНО (та же close-анимация, что и тап по фону):
+  // раньше back-handler снаружи делал setCtxMsg(null) — меню исчезало резко.
+  const closeRef=useRef(close);
+  closeRef.current=close;
+  useEffect(()=>{
+    _ctxMenuClose=()=>{try{closeRef.current();}catch(e){}};
+    return()=>{_ctxMenuClose=null;};
+  },[]);
+
   const downloadMsg=async()=>{
     const src=msg.videoUrl||msg.videoData||msg.fileUrl||msg.fileData||"";
     if(!src){close();return;}
@@ -5961,8 +6291,9 @@ function MsgContextMenu({msg,myUid,chatId,onClose,onReply,onEdit,onForward,onSav
     <div style={{
       position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:800,
       background:visible?"rgba(0,0,0,0.55)":"rgba(0,0,0,0)",
-      transition:"background 0.3s ease",
-      backdropFilter:visible?"blur(3px)":"none",
+      transition:"background 0.28s ease",
+      // Без backdropFilter: живой блюр на Android WebView просаживал старт
+      // анимации до «30 fps». Затемнение фона даёт ту же глубину без тормозов.
     }} onClick={close}>
       <div style={{
         position:"fixed",bottom:0,left:0,right:0,
@@ -6360,10 +6691,12 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   const isSticker=msg.type==="sticker";
   const isCircle=msg.type==="circle";
 
-  // Анимация выезда — только при первом появлении на экране; подмены id
-  // (tmp_→реальный, local_→реальный) монтируются уже «тихими».
-  const seenBefore=MSG_SEEN_IDS.has(msg.id);
-  if(!seenBefore)markMsgSeen(msg.id);
+  // Анимация выезда — только при ПЕРВОМ монтировании бабла. Фиксируется в
+  // ленивом стейте (один раз на mount): подмены id (tmp_→реальный после
+  // addDoc, local_→tmp_ после загрузки файла) монтируются «тихими», а
+  // обычные ре-рендеры (прогресс, onSnapshot-апдейты) НЕ глушат уже
+  // идущую анимацию — раньше вычисление в теле рендера обрывало её.
+  const[seenBefore]=useState(()=>{const s=MSG_SEEN_IDS.has(msg.id);markMsgSeen(msg.id);return s;});
 
   // ── Swipe to reply ──────────────────────────────────────────────────────
   const[swipeX,setSwipeX]=useState(0);
@@ -6526,9 +6859,9 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   };
 
   return(
-    <div style={{display:"flex",flexDirection:fromMe?"row-reverse":"row",alignItems:"flex-end",gap:6,
+    <div data-rmg-msg-id={msg.id||""} style={{display:"flex",flexDirection:fromMe?"row-reverse":"row",alignItems:"flex-end",gap:6,
       marginBottom:2,paddingLeft:fromMe?40:0,paddingRight:fromMe?0:40,
-      animation:(getS("bubbleAnim")===false||seenBefore)?undefined:`${fromMe?"msgInMe":"msgInThem"} 0.55s cubic-bezier(0.22,1,0.36,1) ${Math.min(idx*0.016,0.1)}s both`,
+      animation:(getS("bubbleAnim")===false||seenBefore)?undefined:`${fromMe?"msgInMe":"msgInThem"} 0.95s cubic-bezier(0.22,1,0.36,1) ${Math.min(idx*0.016,0.1)}s both`,
       position:"relative"}}
       onTouchStart={onTStart}
       onTouchMove={onTMove}
@@ -6628,7 +6961,6 @@ const SETTINGS_GROUPS_META = {
   privacy:       { icon:"🔒", Ic:IcSetLock,     tint:"#8e8e93", label:"Конфиденциальность",  subtitle:"Онлайн, последний визит, прочтение" },
   storiesArchive:{ icon:"🕘", Ic:IcSetClock,    tint:"#f4a231", label:"Архив историй",       subtitle:"Твои старые фото и видео из историй" },
   theme:         { icon:"🎨", Ic:IcSetPalette,  tint:"#9c27b0", label:"Темы и оформление",   subtitle:"Тема, обои, размер текста" },
-  offline:       { icon:"📥", Ic:IcSetDownload, tint:"#43a047", label:"Оффлайн-сохранение",  subtitle:"Локальный архив чатов и файлов" },
   about:         { icon:"ℹ️", Ic:IcSetInfo,     tint:"#546e7a", label:"О мессенджере",       subtitle:"Версия, разработчики, контакты" },
 };
 
@@ -6985,7 +7317,7 @@ function StoryArchiveSettings({currentUser,profile}){
             <button key={st.id} onClick={()=>setViewer({items,startIndex:i})}
               style={{position:"relative",aspectRatio:"9/14",border:"none",borderRadius:13,overflow:"hidden",padding:0,background:surface2,cursor:"pointer",boxShadow:"0 3px 12px rgba(0,0,0,.25)"}}>
               {st.mediaType==="video"?(
-                <video src={st.mediaUrl} poster={st.videoThumb||""} muted playsInline preload="metadata" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+                <video src={st.mediaUrl} poster={st.videoThumb||""} playsInline preload="metadata" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
               ):(
                 <img src={st.mediaUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
               )}
@@ -7101,12 +7433,46 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
 
   // ── Открытая группа: «Конфиденциальность» ─────────────────────────────
   if(activeGroup==="privacy"){
+    // ── Блок аккаунта: привязанная почта, смена пароля, смена почты ──────
+    // Использует существующие API-обёртки: requestPasswordReset (код на почту)
+    // и attachEmail (привязка новой почты; требует текущий пароль).
+    const[accBusy,setAccBusy]=useState(false);
+    const changePassword=async()=>{
+      if(accBusy)return;
+      const login=await appPrompt("Твой логин (тег или почта):",profile?.tag?("@"+profile.tag):"","");
+      if(!login)return;
+      setAccBusy(true);
+      try{
+        const r=await requestPasswordReset(login.trim());
+        appConfirm(r?.email?("Код отправлен на "+r.email+". Проверь почту и введи код с новым паролем на экране входа → «Забыли пароль»."):("Код отправлен (если аккаунт найден)."),"Понятно");
+      }catch(e){appConfirm("Не получилось: "+(e?.message||e),"Ок");}
+      setAccBusy(false);
+    };
+    const changeEmail=async()=>{
+      if(accBusy)return;
+      const login=await appPrompt("Твой логин (тег или почта):",profile?.tag?("@"+profile.tag):"","");
+      if(!login)return;
+      const pass=await appPrompt("Твой текущий пароль:","","Продолжить");
+      if(pass===null)return;
+      const email=await appPrompt("Новая почта:","","Привязать");
+      if(!email)return;
+      setAccBusy(true);
+      try{
+        await attachEmail(login.trim(),pass,email.trim());
+        appConfirm("Почта привязана. Может потребоваться подтверждение — проверь входящие.","Готово");
+      }catch(e){appConfirm("Не получилось: "+(e?.message||e),"Ок");}
+      setAccBusy(false);
+    };
     return(
       <div style={{background:surface,marginTop:8}}>
         <T k="showOnline"   icon={<IcDot size={20} color="#43a047" style={_mi}/>} label="Показывать онлайн"  desc="Другие видят когда ты в сети"/>
         <T k="showLastSeen" icon={<IcSetClock size={20} color="#8e8e93" style={_mi}/>} label="Последний онлайн"   desc="Другие видят когда ты последний раз был в сети"/>
         <T k="readReceipts" icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Статус прочтения"   desc="Собеседник видит что ты прочитал сообщение"/>
         <T k="showTyping"   icon={<IcPencilSm size={20} color="#8e8e93" style={_mi}/>} label="Статус «печатает»" desc="Собеседник видит когда ты печатаешь"/>
+        {/* ── Аккаунт ── */}
+        <div style={{padding:"16px 15px 6px",color:text2,fontSize:11,fontWeight:800,letterSpacing:.5}}>АККАУНТ</div>
+        <Row Ic={IcSetLock} tint="#039be5" label="Сменить пароль" val="Код подтверждения придёт на почту" onClick={changePassword}/>
+        <Row Ic={IcSetInfo} tint="#f4a231" label="Сменить почту" val="Привязать к аккаунту другой адрес" onClick={changeEmail}/>
       </div>
     );
   }
@@ -7198,11 +7564,6 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
     );
   }
 
-  // ── Открытая группа: «Оффлайн-сохранение» ─────────────────────────────
-  if(activeGroup==="offline"){
-    return <OfflineSettings online={online} allChats={allChats} currentUser={currentUser}/>;
-  }
-
   // ── Открытая группа: «О мессенджере» ──────────────────────────────────
   // Рендерится как обычная группа настроек: использует общий заголовок overlay'я,
   // общий обработчик «Назад» (_settingsBackHandler) и общий контекст прокрутки.
@@ -7258,7 +7619,7 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
     <>
       {/* Список групп */}
       <div style={{background:surface,marginTop:8}}>
-        {["notifications","chats","privacy","storiesArchive","theme","offline"].map(gid=>{
+        {["notifications","chats","privacy","storiesArchive","theme","about"].map(gid=>{
           const g=SETTINGS_GROUPS_META[gid];
           return(
             <Row key={gid} icon={g.icon} Ic={g.Ic} tint={g.tint} label={g.label} val={g.subtitle} onClick={()=>onOpenGroup(gid)}/>
@@ -7349,7 +7710,7 @@ function MiniPlayer(){
   const collapsed=phase==="entering"||phase==="exiting";
 
   return(
-    <div style={{flexShrink:0,overflow:"hidden"}}>
+    <div style={{flexShrink:0,overflow:"hidden",maxHeight:collapsed?0:72,transition:"max-height 0.32s cubic-bezier(.32,.72,0,1)"}}>
       {/* Tappable area */}
       <div
         onClick={openFullPlayer}
@@ -7812,7 +8173,9 @@ function AudioPlayerScreen({currentUser}){
             boxShadow:"0 20px 50px rgba(0,0,0,0.5)",
             overflow:"hidden",flexShrink:0,
           }}>
-            <AudioWave playing={!!playing} seed={track.id||track.name||"x"}/>
+            {track.coverUrl
+              ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
+              :<AudioWave playing={!!playing} seed={track.id||track.name||"x"}/>}
           </div>
         </div>
 
@@ -7960,7 +8323,9 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
   const[msgs,setMsgs]=useState([]);
-  const audioMsgs=useMemo(()=>msgs.filter(m=>m.type==="audio"&&!m.deletedForAll&&!m.deletedFor?.[currentUser.uid]),[msgs,currentUser.uid]);
+  const audioMsgs=useMemo(()=>msgs.filter(m=>m.type==="audio"&&!m.deletedForAll&&!isMsgDeletedFor(m,currentUser.uid)),[msgs,currentUser.uid]);
+  // Смена чата → чистим «показанные»: история нового чата анимируется при открытии
+  useEffect(()=>{clearSeenMsgs();},[chat?.id]);
   const[msgsReady,setMsgsReady]=useState(false); // true после первой загрузки — убирает "Напишите первым!" во время загрузки
   const[loadingOlder,setLoadingOlder]=useState(false);
   const[hasOlder,setHasOlder]=useState(true);
@@ -8001,6 +8366,9 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[showMembers,setShowMembers]=useState(false);
   const[editMsg,setEditMsg]=useState(null);
   const[showChatMenu,setShowChatMenu]=useState(false);
+  const[chatMenuClosing,setChatMenuClosing]=useState(false);
+  // Плавное закрытие «трёх точек» чата: сначала анимация, потом unmount
+  const closeChatMenu=()=>{if(chatMenuClosing)return;setChatMenuClosing(true);setTimeout(()=>{setShowChatMenu(false);setChatMenuClosing(false);},220);};
   const[showChatInfo,setShowChatInfo]=useState(false);
   const[showChatSettings,setShowChatSettings]=useState(false);
   const[isMuted,setIsMuted]=useState(()=>!!getS("mute_"+chat.id));
@@ -8011,7 +8379,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[partnerPhoto,setPartnerPhoto]=useState(null);
   const[showSearch,setShowSearch]=useState(false);
   const[forwardMsg,setForwardMsg]=useState(null);
-  const bottomRef=useRef(),timerRef=useRef(),mediaRef=useRef(),voiceStreamRef=useRef(null),chunksRef=useRef([]),inputRef=useRef(),lastCntRef=useRef(0),fileRef=useRef(),lpVoiceRef=useRef(null),galleryRef=useRef(null),localSendingRef=useRef({}),quickRecordStartedRef=useRef(false),confirmedTempIdsRef=useRef(new Set());
+  const bottomRef=useRef(),timerRef=useRef(),mediaRef=useRef(),voiceStreamRef=useRef(null),chunksRef=useRef([]),inputRef=useRef(),lastCntRef=useRef(0),fileRef=useRef(),lpVoiceRef=useRef(null),galleryRef=useRef(null),localSendingRef=useRef({}),quickRecordStartedRef=useRef(false),confirmedTempIdsRef=useRef(new Set()),msgsSigRef=useRef("");
 
   // ── Свайп назад (как в TG) ──────────────────────────────────────────────────
   const[online,setOnline]=useState(navigator.onLine);
@@ -8324,10 +8692,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
     if(msgs.length===0)return;
 
-    // Приоритет 3: новое сообщение в реальном времени → скролл только если у дна
+    // Приоритет 3: новое сообщение в реальном времени → ПЛАВНЫЙ скролл у дна
+    // (раньше был мгновенный прыжок — список «резко уходил вверх», и боковой
+    // выезд бабла на этом фоне выглядел дёрганым). Анимация прокрутки
+    // синхронна по времени с выездом бабла (~0.5s).
     if(msgs.length>prevMsgCount.current&&isNearBottomRef.current){
-      el.style.scrollBehavior='auto';
+      el.style.scrollBehavior='smooth';
       el.scrollTop=el.scrollHeight+99999;
+      setTimeout(()=>{if(el)el.style.scrollBehavior='auto';},600);
     }
     prevMsgCount.current=msgs.length;
   }); // без deps — срабатывает на каждый рендер ДО отрисовки браузером (нет flash)
@@ -8341,8 +8713,44 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     scrollAnchorRef.current=null;
     loadingOlderRef.current=false;
     lastCntRef.current=0;
-    setMsgsReady(false);
-    setMsgs([]);
+    msgsSigRef.current=""; // подпись ленты — новая лента, чистая
+    // Мгновенное восстановление из памяти прошлой сессии этого чата: лента
+    // показывается сразу, БЕЗ спиннера загрузки (SQLite/сеть лишь уточнят её).
+    const memo=_chatMsgsMemo.get(chat.id);
+    if(memo&&memo.length){
+      setMsgs(memo);
+      setMsgsReady(true);
+      shouldScrollBottomRef.current=true; // доскролл-интервал ниже подхватит
+    }else{
+      setMsgsReady(false);
+      setMsgs([]);
+    }
+
+    // Доскролл «до конца вниз»: первый прыжок срабатывает до того, как браузер
+    // дорисует высоты сообщений (картинки/медиа добивают высоту позже) — лента
+    // останавливалась «чуть выше низа». Повторяем доскролл в несколько тиков
+    // после открытия чата, пока высота не перестанет расти.
+    // ВАЖНО: без раннего return — этот блок стоит В НАЧАЛЕ эффекта смены чата,
+    // а cleanup объединён с основным внизу (ранний return обрезал загрузку!).
+    const bottomTick=()=>{
+      const el=msgsRef.current;
+      if(!el)return false;
+      // Пользователь уже скроллит сам (илиIME-анимация двигает список) —
+      // не мешаем: наш доскролл только мешал и создавал «дёргание».
+      if(window.__rmgImeMoving)return true;
+      const dist=el.scrollHeight-el.scrollTop-el.clientHeight;
+      if(dist>140)return false; // пользователь уехал вверх — не тянем назад
+      el.style.scrollBehavior='auto';
+      const before=el.scrollHeight;
+      el.scrollTop=el.scrollHeight+99999;
+      return el.scrollHeight!==before||Math.abs(el.scrollHeight-el.scrollTop-el.clientHeight)>2;
+    };
+    let bottomTries=0;
+    const settle=setInterval(()=>{
+      bottomTries++;
+      const changed=bottomTick();
+      if(!changed||bottomTries>40){clearInterval(settle);} // 40×120мс ≈ 5с максимум
+    },120);
 
     let cancelled=false; // защита от гонки при быстрой смене чата
 
@@ -8434,10 +8842,23 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         }
 
         lastCntRef.current=list.length;
+        // ── Подпись ленты: если ни одно сообщение не изменилось (сравнение по
+        // id+времени+readBy+reactions), НЕ перерендериваем и НЕ пишем SQLite.
+        // Раньше каждый пульс onSnapshot при онлайне пересобирал весь массив
+        // → лента мигала и дёргалась даже без единого изменения данных.
+        const sig=list.map(m=>m.id+"|"+(m.createdAt?.seconds||0)+"|"+(m.text||"")+"|"+(m.readBy?(m.readBy[currentUser.uid]?"r":""):"")+"|"+(m.reactions&&Object.keys(m.reactions).length?JSON.stringify(m.reactions):"")).join(";");
+        if(!isFirstLoad&&sig===msgsSigRef.current){
+          shouldScrollBottomRef.current=false; // без изменений — и скролл не дёргаем
+          return;
+        }
+        msgsSigRef.current=sig;
         const locals=Object.values(localSendingRef.current||{});
         if(isFirstLoad){
           // Первая загрузка — заменяем целиком (кэш уже отработал своё выше).
-          setMsgs(locals.length?[...list,...locals]:list);
+          // Заглушки с nonce, уже пришедшими в list (гонка отправки), не дублируем.
+          const listNonces=new Set(list.filter(m=>m.nonce).map(m=>m.nonce));
+          const liveLocals=locals.filter(l=>!(l.nonce&&listNonces.has(l.nonce)));
+          setMsgs(liveLocals.length?[...list,...liveLocals]:list);
         }else{
           // Последующие срабатывания слушателя «последних 20» — СЛИВАЕМ с уже
           // загруженной историей, а не затираем её. Иначе любое сообщение
@@ -8446,10 +8867,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           // документах (новое сообщение, readBy, реакция и т.п.) —
           // из-за этого переписка «то грузится, то нет».
           const freshIds=new Set(list.map(m=>m.id));
+          // nonce-дедуп: слушатель принёс реальное сообщение — глушим ЛЮБУЮ
+          // заглушку с тем же nonce (tmp_ и local_), не только по id.
+          const freshNonces=new Set(list.filter(m=>m.nonce).map(m=>m.nonce));
           setMsgs(prev=>{
             const older=prev.filter(m=>
               !freshIds.has(m.id)&&
               !locals.some(l=>l.id===m.id)&&
+              !(m.nonce&&freshNonces.has(m.nonce))&&
               // Гонка: оптимистичное сообщение (tmp_...) ещё не успело
               // переименоваться в реальный id (см. sendMsg), а слушатель уже
               // принёс это же сообщение в list — без этой проверки на экране
@@ -8457,6 +8882,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
               !(String(m.id||"").startsWith("tmp_")&&confirmedTempIdsRef.current.has(m.id))
             );
             const merged=[...older,...list,...locals];
+            // Мгновенное восстановление при следующем заходе в этот чат
+            try{if(merged.length)_chatMsgsMemo.set(chat.id,merged.slice(-80));}catch(e){}
             merged.sort((a,b)=>{
               const ta=a.createdAt?.seconds?a.createdAt.seconds*1000:(a.unixMs||0);
               const tb=b.createdAt?.seconds?b.createdAt.seconds*1000:(b.unixMs||0);
@@ -8498,7 +8925,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         console.log("Firestore offline, using SQLite cache");
       });
     }catch(e){}
-    return()=>{cancelled=true;unsub?.();};
+    return()=>{cancelled=true;clearInterval(settle);unsub?.();};
   },[chat.id,online]);
 
   // Загрузка старых сообщений при скролле вверх
@@ -8561,6 +8988,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     // разрыв и повторная анимация).
     const replaceLocalId=payload._replaceLocalId;
     delete payload._replaceLocalId;
+    // nonce — стабильный идентификатор «одно и то же сообщение» через ВСЕ
+    // подмены id (tmp_→реальный, local_→tmp_). Используется как React-ключ
+    // (бабл не перемонтируется → анимация не дёргается) и для дедупа со
+    // слушателем (реальное сообщение с тем же nonce глушит заглушку —
+    // больше нет дубля-«макета» на экране).
+    const nonce=payload._nonce||replaceLocalId||tempId;
+    delete payload._nonce;
+    payload.nonce=nonce;
     if(replyBase)payload.replyTo={
       id:replyBase.id,author:replyBase.author,uid:replyBase.uid,type:replyBase.type,
       text:replyBase.text||replyBase.fileName||"",
@@ -8603,6 +9038,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       // убираем временную заглушку — настоящая копия уже в списке.
       confirmedTempIdsRef.current.add(tempId);
       setMsgs(prev=>{
+        // Реальное уже успел принести слушатель (по id) — убираем заглушку.
+        // По nonce НЕ проверяем: nonce совпадает с самой заглушкой tmp_.
         const hasReal=prev.some(m=>m.id===ref.id);
         if(hasReal)return prev.filter(m=>m.id!==tempId);
         return prev.map(m=>m.id===tempId?{...m,id:ref.id,_pending:false}:m);
@@ -8675,53 +9112,41 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     }catch(e){console.error("saveToFavorites",e);showToast?.({msg:"Не удалось сохранить",type:"err"});}
   };
 
-  const flyMsg=(text)=>{
+  // Плавное «растворение» текста из поля ввода при отправке: летящий клон
+  // (flyMsg) убран — он конфликтовал с боковым выездом бабла. Теперь текст
+  // мягко уезжает вверх и тает, поле очищается уже под пустым инпутом.
+  const flyMsg=(txt)=>{
     if(getS("bubbleAnim")===false)return;
     const inputEl=inputRef.current;
     if(!inputEl)return;
-    const msgsEl=msgsRef.current;
-    if(!msgsEl)return;
-
     const inputRect=inputEl.getBoundingClientRect();
-    const msgsRect=msgsEl.getBoundingClientRect();
-
-    // Создаём летящий клон
-    const fly=document.createElement("div");
-    fly.textContent=text;
-    fly.style.cssText=`
+    const fade=document.createElement("div");
+    fade.textContent=txt;
+    fade.style.cssText=`
       position:fixed;
-      right:${window.innerWidth-inputRect.right+8}px;
+      left:${inputRect.left+14}px;
       top:${inputRect.top}px;
-      background:linear-gradient(135deg,${accent},${accent2});
-      color:${contrastOn(accent)==="#000"?"#000":"#fff"};
-      padding:9px 13px;
-      border-radius:20px 20px 4px 20px;
-      font-size:14px;
-      line-height:1.55;
-      max-width:72vw;
-      word-break:break-word;
-      box-shadow:0 3px 14px ${accent}66;
+      height:${inputRect.height}px;
+      line-height:${inputRect.height}px;
+      color:${text2};
+      font-size:15px;
+      font-family:inherit;
+      max-width:60vw;
+      overflow:hidden;
+      white-space:nowrap;
+      text-overflow:ellipsis;
       z-index:9999;
       pointer-events:none;
-      opacity:1;
-      transform-origin:bottom right;
-      transform:scale(1);
-      transition:none;
-      will-change:transform,top,opacity;
+      opacity:0.9;
+      transform:translateY(0);
+      transition:transform 0.42s cubic-bezier(0.22,1,0.36,1), opacity 0.42s ease;
+      will-change:transform,opacity;
     `;
-    document.body.appendChild(fly);
-
-    const flyRect=fly.getBoundingClientRect();
-    // Целевая позиция — нижняя часть списка сообщений
-    const targetTop=msgsRect.bottom-flyRect.height-16;
-    const dy=targetTop-inputRect.top;
-
+    document.body.appendChild(fade);
     requestAnimationFrame(()=>{
-      fly.style.transition=`top 0.32s cubic-bezier(0.22,0.61,0.36,1), opacity 0.28s ease, transform 0.32s cubic-bezier(0.22,0.61,0.36,1)`;
-      fly.style.top=`${targetTop}px`;
-      fly.style.opacity="0";
-      fly.style.transform="scale(0.88)";
-      setTimeout(()=>fly.remove(),350);
+      fade.style.transform="translateY(-14px)";
+      fade.style.opacity="0";
+      setTimeout(()=>fade.remove(),480);
     });
   };
 
@@ -8838,8 +9263,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   };
 
   const addLocalSending=(msg)=>{
-    localSendingRef.current={...localSendingRef.current,[msg.id]:msg};
-    setMsgs(prev=>[...prev,msg]);
+    // nonce = id заглушки: когда sendMsg подменит её tmp_ (через
+    // _replaceLocalId), nonce совпадёт → React-ключ тот же → подмена
+    // бесшовная, без исчезновения и повторной анимации.
+    const withNonce={...msg,nonce:msg.id};
+    localSendingRef.current={...localSendingRef.current,[msg.id]:withNonce};
+    setMsgs(prev=>[...prev,withNonce]);
   };
   const updateLocalSending=(id,patch)=>{
     localSendingRef.current={...localSendingRef.current,[id]:{...(localSendingRef.current[id]||{}),...patch}};
@@ -8953,6 +9382,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[msgSearch,setMsgSearch]=useState("");
   const[showMsgSearch,setShowMsgSearch]=useState(false);
   const[fwdMsg,setFwdMsg]=useState(null); // message to forward
+  const[fwdTarget,setFwdTarget]=useState(null); // выбранный чат для пересылки (шаг подтверждения)
+  const[fwdBusy,setFwdBusy]=useState(false);
   const[voiceHolding,setVoiceHolding]=useState(false);
   const[quickMode,setQuickMode]=useState("voice");
   const[circleFs,setCircleFs]=useState(null); // fullscreen circle src
@@ -9091,8 +9522,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       if(showMembers){setShowMembers(false);return true;}
       if(showSearch){setShowSearch(false);return true;}
       if(fwdMsg){setFwdMsg(null);return true;}
-      if(ctxMsg){setCtxMsg(null);return true;}
-      if(showChatMenu){setShowChatMenu(false);return true;}
+      if(ctxMsg){if(_ctxMenuClose){try{_ctxMenuClose();}catch(e){}}else setCtxMsg(null);return true;}
+      if(showChatMenu){if(chatMenuClosing)return true;setChatMenuClosing(true);setTimeout(()=>{setShowChatMenu(false);setChatMenuClosing(false);},220);return true;}
       if(showAttach){setShowAttach(false);return true;}
       if(showEmoji){closeEmojiPanel();return true;}
       if(replyTo){setReplyTo(null);return true;}
@@ -9155,15 +9586,15 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           <div style={{position:"relative"}}>
             <button onClick={e=>{e.stopPropagation();setShowChatMenu(m=>!m);}} style={{width:36,height:36,borderRadius:"50%",background:surface2,border:`1px solid ${border}`,color:text2,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⋮</button>
             {showChatMenu&&(<>
-              <div style={{position:"fixed",inset:0,zIndex:199}} onClick={()=>setShowChatMenu(false)}/>
-              <div style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)"}} onClick={e=>e.stopPropagation()}>
+              <div style={{position:"fixed",inset:0,zIndex:199}} onClick={closeChatMenu}/>
+              <div style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",animation:chatMenuClosing?"menuFadeQ 0.22s ease forwards":"menuPopQ 0.26s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
                 {[
-                  {ico:isMuted?<IcSetBell size={18} color="#8e8e93" style={_mi}/>:<IcMute size={18} color="#8e8e93" style={_mi}/>,lbl:isMuted?"Включить звук":"Выключить звук",fn:()=>{const m=!isMuted;setIsMuted(m);setS("mute_"+chat.id,m);setShowChatMenu(false);}},
-                  ...(canManage?[{ico:<IcTabSettings size={18} color="#8e8e93" style={_mi}/>,lbl:"Настройки",fn:()=>{setShowChatMenu(false);setShowChatSettings(true);}}]:[]),
+                  {ico:isMuted?<IcSetBell size={18} color="#8e8e93" style={_mi}/>:<IcMute size={18} color="#8e8e93" style={_mi}/>,lbl:isMuted?"Включить звук":"Выключить звук",fn:()=>{const m=!isMuted;setIsMuted(m);setS("mute_"+chat.id,m);closeChatMenu();}},
+                  ...(canManage?[{ico:<IcTabSettings size={18} color="#8e8e93" style={_mi}/>,lbl:"Настройки",fn:()=>{closeChatMenu();setShowChatSettings(true);}}]:[]),
                   {ico:<IcTrash size={18} color="#ff5252" style={_mi}/>,lbl:"Удалить чат",red:true,fn:async()=>{
                     if(await appConfirm("Удалить чат у себя?","Удалить")){
                       updateDoc(doc(db,"chats",chat.id),{members:(chatData.members||[]).filter(m=>m!==currentUser.uid)}).catch(()=>{});
-                      setShowChatMenu(false);onBack();
+                      closeChatMenu();onBack();
                     }
                   }},
                 ].map((item,i)=>(
@@ -9221,9 +9652,9 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             </div>
           ):null}
           {msgs.map((m,i)=>{
-            if(m.deletedFor?.[currentUser.uid]||m.deletedForAll)return null;
+            if(isMsgDeletedFor(m,currentUser.uid)||m.deletedForAll)return null;
             if(m.botCmd)return null; // служебная команда боту — не показываем
-            return <Msg key={m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{try{inputRef.current?.blur();}catch(e){}const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c,botCmd:true}).catch(()=>{});}}/>;
+            return <Msg key={m.nonce||m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{try{inputRef.current?.blur();}catch(e){}const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c,botCmd:true}).catch(()=>{});}}/>;
           })}
           <div ref={bottomRef}/>
           <div ref={imeSpacerRef} style={{flexShrink:0}}/>
@@ -9283,7 +9714,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {attachMounted&&!showEmoji&&(
           <div style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",animation:attachClosing?"slideDown 0.2s ease forwards":"slideUp 0.2s ease"}} onClick={e=>e.stopPropagation()}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9}}>
-              {[{ico:<IcImage size={24} color={accent} style={_mi}/>,lbl:"Галерея",fn:()=>{if(galleryRef.current){galleryRef.current.click();}}},{ico:<IcFileDoc size={24} color="#f4a231" style={_mi}/>,lbl:"Файл",fn:()=>fileRef.current?.click()},{ico:<IcMusic size={24} color="#9c27b0" style={_mi}/>,lbl:"Музыка",fn:()=>fileRef.current?.click()},{ico:<IcCircleVid size={24} color="#43a047" style={_mi}/>,lbl:"Кружок",fn:startCircle}].map(b=>(
+              {[{ico:<IcImage size={24} color={accent} style={_mi}/>,lbl:"Галерея",fn:()=>{if(galleryRef.current){galleryRef.current.click();}}},{ico:<IcFileDoc size={24} color="#f4a231" style={_mi}/>,lbl:"Файл",fn:()=>fileRef.current?.click()},{ico:<IcMusic size={24} color="#9c27b0" style={_mi}/>,lbl:"Музыка",fn:()=>fileRef.current?.click()}].map(b=>(
                 <button key={b.lbl} onClick={e=>{e.stopPropagation();b.fn();setShowAttach(false);}} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,padding:"11px 6px",background:surface2,border:`1px solid ${border}`,borderRadius:14,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}} onMouseEnter={e=>e.currentTarget.style.background=accent+"22"} onMouseLeave={e=>e.currentTarget.style.background=surface2}>
                   <span style={{fontSize:24}}>{b.ico}</span>
                   <span style={{color:text2,fontSize:11}}>{b.lbl}</span>
@@ -9468,66 +9899,112 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {showAddMembers&&<AddMembersModal chat={chatData} currentUser={currentUser} onClose={()=>setShowAddMembers(false)}/>}
         {showChatInfo&&<ChatInfoModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatInfo(false)} onOpenSettings={()=>{setShowChatInfo(false);setShowChatSettings(true);}}/>}
         {showChatSettings&&<ChatSettingsModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatSettings(false)} onSaved={patch=>setChatData(c=>({...c,...patch}))}/>}
-        {showSearch&&<MsgSearch chatId={chat.id} onClose={()=>setShowSearch(false)} onJump={()=>{}}/> }
+        {/* Поиск: прыжок К НАЙДЕННОМУ сообщению (раньше onJump был пустой
+            заглушкой — «отправляло в конец» и без подсветки). Если сообщение
+            не в загруженной части — догружаем историю до него. */}
+        {showSearch&&<MsgSearch chatId={chat.id} onClose={()=>setShowSearch(false)} onJump={async msgId=>{
+          // 1. Если сообщение уже в ленте — скролл к нему + подсветка
+          const jumpToLoaded=()=>{
+            const el=msgsRef.current;
+            if(!el)return false;
+            const nodes=el.querySelectorAll('[data-rmg-msg-id="'+msgId+'"]');
+            if(!nodes.length)return false;
+            nodes[0].scrollIntoView({block:"center",behavior:"smooth"});
+            nodes[0].style.animation="jumpFlashQ 1.6s ease 1";
+            setTimeout(()=>{if(nodes[0])nodes[0].style.animation="";},1700);
+            return true;
+          };
+          if(jumpToLoaded())return;
+          // 2. Сообщение старше загруженного — грузим историю до него
+          try{
+            let guard=0;
+            while(guard<20){
+              guard++;
+              await new Promise(res=>loadOlderMsgs().finally(res));
+              const stateNow=msgsRef.current;
+              if(!stateNow)break;
+              const inDom=stateNow.querySelector('[data-rmg-msg-id="'+msgId+'"]');
+              if(inDom){inDom.scrollIntoView({block:"center"});inDom.style.animation="jumpFlashQ 1.6s ease 1";setTimeout(()=>{if(inDom)inDom.style.animation="";},1700);break;}
+              if(!hasOlder)break; // история кончилась
+            }
+          }catch(e){}
+        }}/> }
       {showMembers&&<GroupMembersModal chat={chatData} currentUser={currentUser} onClose={()=>setShowMembers(false)} showToast={showToast}/>}
         {/* Forward Modal */}
+      {/* Forward Modal: выбор чата → ПОДТВЕРЖДЕНИЕ → отправка.
+          Раньше тап по чату шёл мгновенно без подтверждения — пользователь
+          не понимал, переслалось ли. Теперь два шага + плавные анимации. */}
       {fwdMsg&&(
-        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",flexDirection:"column"}}>
-          <div style={{padding:"16px 20px",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:12}}>
-            <button onClick={()=>setFwdMsg(null)} style={{background:"none",border:"none",color:text,fontSize:22,cursor:"pointer"}}>✕</button>
-            <div style={{color:text,fontWeight:700,fontSize:16}}>Переслать в...</div>
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:600,display:"flex",flexDirection:"column",animation:"fadeInQ 0.22s ease"}}>
+          <div style={{padding:"max(env(safe-area-inset-top,16px),16px) 20px 14px",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:12,background:surface}}>
+            <button onClick={()=>{setFwdTarget(null);setFwdMsg(null);}} style={{background:"none",border:"none",color:text,fontSize:22,cursor:"pointer"}}>✕</button>
+            <div style={{color:text,fontWeight:700,fontSize:16}}>{fwdTarget?"Подтверждение":"Переслать в..."}</div>
           </div>
+          {fwdTarget?(
+            <div style={{background:surface,animation:"slideUp 0.25s ease",display:"flex",flexDirection:"column",gap:14,padding:20,borderRadius:"0 0 20px 20px"}}>
+              <div style={{color:text2,fontSize:13,lineHeight:1.5}}>
+                Переслать <b style={{color:text}}>{fwdMsg.type==="text"?`«${(fwdMsg.text||"").slice(0,40)}${(fwdMsg.text||"").length>40?"…":""}»`:"медиа"}</b> в чат <b style={{color:text}}>«{fwdTarget.name}»</b>?
+              </div>
+              <button onClick={async()=>{
+                const c=fwdTarget;
+                const msg=fwdMsg;
+                setFwdBusy(true);
+                try{
+                  const chatSnap=await getDoc(doc(db,"chats",c.id));
+                  if(!chatSnap.exists()){
+                    await setDoc(doc(db,"chats",c.id),{
+                      ...c,id:c.id,members:[...new Set([...(c.members||[]),currentUser.uid])],
+                      createdAt:serverTimestamp()
+                    });
+                  } else {
+                    if(!(c.members||[]).includes(currentUser.uid)){
+                      await updateDoc(doc(db,"chats",c.id),{members:arrayUnion(currentUser.uid)});
+                    }
+                  }
+                  const fwdText=msg.text||"";
+                  await addDoc(collection(db,"chats",c.id,"messages"),{
+                    author:profile?.name||currentUser.displayName||"?",
+                    uid:currentUser.uid,
+                    type:msg.type||"text",
+                    text:fwdText,
+                    fileUrl:msg.fileUrl||"",
+                    fileData:msg.fileData||"",
+                    fileName:msg.fileName||"",
+                    fileType:msg.fileType||"",
+                    fileSize:msg.fileSize||0,
+                    audioUrl:msg.audioUrl||"",
+                    audioData:msg.audioData||"",
+                    videoUrl:msg.videoUrl||"",
+                    videoData:msg.videoData||"",
+                    waveform:msg.waveform||[],
+                    duration:msg.duration||"",
+                    forwarded:true,
+                    forwardedFrom:"",
+                    createdAt:serverTimestamp(),
+                    time:new Date().toLocaleTimeString("ru",{hour:"2-digit",minute:"2-digit"}),
+                  });
+                  await updateDoc(doc(db,"chats",c.id),{
+                    lastMsg:"↪️ "+profile?.name,
+                    lastTime:timeNow(),
+                    lastTimeMs:Date.now(),
+                    members:arrayUnion(currentUser.uid)
+                  });
+                  showToast?.({icon:"↪️",title:"Переслано"});
+                  setFwdTarget(null);setFwdMsg(null);
+                }catch(e){alert("Ошибка: "+e.message);}
+                setFwdBusy(false);
+              }} disabled={fwdBusy} style={{padding:14,border:"none",borderRadius:14,background:`linear-gradient(135deg,${accent},${accent2})`,color:"#fff",fontSize:15,fontWeight:800,cursor:fwdBusy?"default":"pointer",fontFamily:"inherit",opacity:fwdBusy?0.6:1}}>
+                {fwdBusy?"Пересылаем…":"Переслать"}
+              </button>
+              <button onClick={()=>setFwdTarget(null)} style={{padding:12,border:"none",borderRadius:14,background:surface2,color:text2,fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Назад к списку</button>
+            </div>
+          ):(
           <div style={{flex:1,overflowY:"auto"}}>
             {chats.map(c=>{
               const name=c.type==="direct"?Object.values(c.names||{}).find(n=>n!==profile?.name)||c.name:c.name;
               return(
-                <div key={c.id} onClick={async()=>{
-                  try{
-                    // Ensure chat doc exists
-                    const chatSnap=await getDoc(doc(db,"chats",c.id));
-                    if(!chatSnap.exists()){
-                      await setDoc(doc(db,"chats",c.id),{
-                        ...c,id:c.id,members:[...new Set([...(c.members||[]),currentUser.uid])],
-                        createdAt:serverTimestamp()
-                      });
-                    } else {
-                      // Make sure we're in members list (needed for Firestore rules)
-                      if(!(c.members||[]).includes(currentUser.uid)){
-                        await updateDoc(doc(db,"chats",c.id),{members:arrayUnion(currentUser.uid)});
-                      }
-                    }
-                    const fwdText=fwdMsg.text||"";
-                    await addDoc(collection(db,"chats",c.id,"messages"),{
-                      author:profile?.name||currentUser.displayName||"?",
-                      uid:currentUser.uid,
-                      type:fwdMsg.type||"text",
-                      text:fwdText,
-                      fileUrl:fwdMsg.fileUrl||"",
-                      fileData:fwdMsg.fileData||"",
-                      fileName:fwdMsg.fileName||"",
-                      fileType:fwdMsg.fileType||"",
-                      fileSize:fwdMsg.fileSize||0,
-                      audioUrl:fwdMsg.audioUrl||"",
-                      audioData:fwdMsg.audioData||"",
-                      videoUrl:fwdMsg.videoUrl||"",
-                      videoData:fwdMsg.videoData||"",
-                      waveform:fwdMsg.waveform||[],
-                      duration:fwdMsg.duration||"",
-                      forwarded:true,
-                      forwardedFrom:"", // скрываем от кого
-                      createdAt:serverTimestamp(),
-                      time:new Date().toLocaleTimeString("ru",{hour:"2-digit",minute:"2-digit"}),
-                    });
-                    await updateDoc(doc(db,"chats",c.id),{
-                      lastMsg:"↪️ "+profile?.name,
-                      lastTime:timeNow(),
-                      lastTimeMs:Date.now(),
-                      members:arrayUnion(currentUser.uid)
-                    });
-                    setFwdMsg(null);
-                  }catch(e){alert("Ошибка: "+e.message);}
-                }}
-                style={{display:"flex",alignItems:"center",gap:12,padding:"12px 20px",cursor:"pointer",borderBottom:`1px solid ${border}`}}
+                <div key={c.id} onClick={()=>setFwdTarget({...c,name})}
+                style={{display:"flex",alignItems:"center",gap:12,padding:"12px 20px",cursor:"pointer",borderBottom:`1px solid ${border}`,animation:`fadeInQ 0.25s ease ${Math.min(chats.indexOf(c)*0.03,0.2)}s both`}}
                 onTouchStart={e=>e.currentTarget.style.background=surface2}
                 onTouchEnd={e=>e.currentTarget.style.background="transparent"}>
                   <Avatar name={name} size={44} photo={c.photo||null}/>
@@ -9536,9 +10013,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
               );
             })}
           </div>
+          )}
         </div>
       )}
-      {ctxMsg&&<MsgContextMenu msg={ctxMsg} myUid={currentUser.uid} chatId={chat.id} onClose={()=>setCtxMsg(null)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onEdit={msg=>{setEditMsg(msg);setInputText(msg.text);setTimeout(()=>inputRef.current?.focus(),100);}} onForward={msg=>setFwdMsg(msg)} onSave={saveToFavorites}/>}
+      {ctxMsg&&<MsgContextMenu msg={ctxMsg} myUid={currentUser.uid} chatId={chat.id} onClose={()=>setCtxMsg(null)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onEdit={msg=>{setEditMsg(msg);setInputText(msg.text||"");if(inputRef.current){inputRef.current.value=msg.text||"";setTimeout(()=>{inputRef.current?.focus();try{inputRef.current.setSelectionRange((msg.text||"").length,(msg.text||"").length);}catch(e){}},120);}}} onForward={msg=>setFwdMsg(msg)} onSave={saveToFavorites}/>}
     </div>
   );
 }
@@ -9619,6 +10097,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   const tab=TABS[tabIdx]?.id||"all";
   const[creating,setCreating]=useState(null);
   const[fab,setFab]=useState(false);
+  const[fabClosing,setFabClosing]=useState(false);
+  const toggleFab=()=>{if(fab){setFabClosing(true);setTimeout(()=>{setFab(false);setFabClosing(false);},200);return;}haptic(8);setFab(true);};
+  const closeFab=()=>{if(!fab||fabClosing)return;setFabClosing(true);setTimeout(()=>{setFab(false);setFabClosing(false);},200);};
 
   // Кэш фото пользователей для аватарок
   const[photosCache,setPhotosCache]=useState(()=>{try{const m=JSON.parse(localStorage.getItem("mrx_photos")||"{}");Object.keys(m).forEach(k=>{if(typeof m[k]!=="string"||!m[k].startsWith("data:"))delete m[k];});try{localStorage.setItem("mrx_photos",JSON.stringify(m));}catch{}return m;}catch{return{};}});
@@ -9714,6 +10195,18 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
       const _hidden=readHidden("rmg_hidden_chats_"+(currentUser.uid));
       const filtered=list.filter(c=>!isHiddenChat(_hidden,currentUser.uid,c));
       setChats(filtered);onChatsLoad?.(filtered);
+      // ── Telegram-style префетч: очередь фоновых догрузок лент всех чатов.
+      // Последовательно, с паузой 400мс — слабый сервер (512 МБ) не душим.
+      // Через _chatMsgsMemo+SQLite любой чат открывается мгновенно.
+      if(navigator.onLine){
+        (async()=>{
+          for(const c of filtered){
+            if(!navigator.onLine)break;
+            await prefetchChat(c.id);
+            await new Promise(r=>setTimeout(r,400));
+          }
+        })();
+      }
       setChatsReady(true);
       // Кэш для оффлайн-запуска. Сохраняем ВСЕ чаты (метаданные мизерные),
       // и только если выборка не пустая — пустой массив никогда не пишем.
@@ -9831,6 +10324,30 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   },[currentUser?.uid]);
 
   const[ctxChat,setCtxChat]=useState(null);
+  const[ctxClosing,setCtxClosing]=useState(false);
+  // Плавное закрытие меню чата: анимация sheetDownQ, потом реальный unmount.
+  // ctxChat держим до конца анимации (внутри рендера читаются поля).
+  const closeCtx=()=>{if(ctxClosing||!ctxChat)return;setCtxClosing(true);setTimeout(()=>{setCtxChat(null);setCtxClosing(false);},300);};
+  // Анимированное удаление строки чата (плавно уезжает вправо, потом исчезает)
+  const[removingId,setRemovingId]=useState(null);
+  const animatedRemoveChat=(c,doAfter)=>{
+    setRemovingId(c.id);
+    setTimeout(()=>{doAfter&&doAfter();setRemovingId(null);},260);
+  };
+  // Жест «Назад» в чат-листе: закрывает FAB-панель/контекстное меню чата,
+  // а не сворачивает приложение. ВАЖНО: эффект стоит ПОСЛЕ объявлений
+  // ctxClosing/closeCtx/removingId — deps-массив вычисляется В РЕНДЕРЕ,
+  // и при размещении эффекта выше объявлений был TDZ-краш «Cannot access
+  // 'U' before initialization» → чёрный экран после логина.
+  useEffect(()=>{
+    _chatListBackHandler=()=>{
+      if(fab){closeFab();return true;}
+      if(ctxChat){closeCtx();return true;}
+      return false;
+    };
+    return()=>{_chatListBackHandler=null;};
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[fab,fabClosing,ctxChat,ctxClosing]);
   const[ctxPos,setCtxPos]=useState({x:0,y:0});
 
   const openCtx=(c,e)=>{
@@ -9842,7 +10359,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
     const muted=getS("mute_"+c.id);
     setS("mute_"+c.id,muted?0:1);
     syncPushPreferences(currentUser.uid).catch(()=>{});
-    setCtxChat(null);
+    closeCtx();
   };
 
   const deleteChatForEveryone=async(c)=>{
@@ -9881,12 +10398,16 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
     setCtxChat(null);
   };
 
+  // Очистка истории: nested-поле deletedFor.{uid} серверный PATCH не применяет
+  // (см. MsgContextMenu — там arrayUnion и работает). Пишем ТОЧНО так же.
   const clearChatHistory=async(c)=>{
     try{
       const msgs=await getDocs(collection(db,"chats",c.id,"messages"));
       await Promise.all(msgs.docs.map(d=>
-        updateDoc(doc(db,"chats",c.id,"messages",d.id),{deletedFor:{[currentUser.uid]:true}})
+        updateDoc(doc(db,"chats",c.id,"messages",d.id),{deletedFor:arrayUnion(currentUser.uid)})
       ));
+      // Чистим и локальный кэш сообщений этого чата
+      try{await clearChatMsgs(c.id);}catch(e2){}
     }catch(e){}
     setCtxChat(null);
   };
@@ -9894,7 +10415,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   const pinChat=async(c)=>{
     const pinned=getS("pin_"+c.id);
     setS("pin_"+c.id,pinned?0:1);
-    setCtxChat(null);
+    closeCtx();
   };
 
   const markRead=async(c)=>{
@@ -9903,7 +10424,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         [`unreadBy.${currentUser.uid}`]:0
       });
     }catch(e){}
-    setCtxChat(null);
+    closeCtx();
   };
 
   const getName=c=>{if(c.type==="direct"&&c.names){const o=Object.keys(c.names).find(k=>k!==currentUser.uid);return c.names[o]||c.name;}return c.name;};
@@ -9928,7 +10449,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
           {/* Right: action buttons */}
           <div style={{display:"flex",gap:7}}>
             <button onClick={onFind} className="rmg-press" style={{width:36,height:36,borderRadius:"50%",background:surface2,border:`1px solid ${border}`,color:accent,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}><IcSearchSm size={18}/></button>
-            <button onClick={()=>{haptic(8);setFab(f=>!f);}} style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",color:contrastOn(accent),fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.25s",transform:fab?"rotate(45deg)":"none"}}><IcPencilSm size={17}/></button>
+            <button onClick={toggleFab} style={{width:36,height:36,borderRadius:"50%",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",color:contrastOn(accent),fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"transform 0.25s",transform:fab?"rotate(45deg)":"none"}}><IcPencilSm size={17}/></button>
           </div>
         </div>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Поиск" style={{width:"100%",background:surface2,border:"none",borderRadius:14,padding:"11px 15px",color:text,fontSize:14,transition:"all 0.3s ease",outline:"none",boxSizing:"border-box",fontFamily:"inherit"}}/>
@@ -10085,7 +10606,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
                         display:"flex",alignItems:"center",gap:13,padding:"11px 13px",
                         marginBottom:9,borderRadius:18,background:surface2,
                         cursor:"pointer",transition:"background 0.13s",
-                        animation:`listIn 0.2s ease ${Math.min(i*0.04,0.3)}s both`,
+                        animation:removingId===c.id?"rowOutQ 0.26s cubic-bezier(0.4,0,1,1) forwards":`listIn 0.2s ease ${Math.min(i*0.04,0.3)}s both`,
                       }}>
                       <div style={{position:"relative",flexShrink:0}}>
                         <Avatar name={name} size={50} photo={
@@ -10125,10 +10646,10 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         </div>
       </div>
       {/* FAB dropdown */}
-      {fab&&(
-        <div style={{position:"fixed",bottom:86,right:18,zIndex:200,display:"flex",flexDirection:"column",gap:9,animation:"slideUp 0.2s ease"}}>
-          <button onClick={()=>{setFab(false);setCreating("channel");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabChannels size={17} color={accent}/><span>Создать канал</span></button>
-          <button onClick={()=>{setFab(false);setCreating("group");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabGroups size={17} color={accent}/><span>Создать группу</span></button>
+      {(fab||fabClosing)&&(
+        <div style={{position:"fixed",bottom:86,right:18,zIndex:200,display:"flex",flexDirection:"column",gap:9,animation:fabClosing?"fabFadeQ 0.2s ease forwards":"fabPopQ 0.26s cubic-bezier(0.22,1,0.36,1)"}}>
+          <button onClick={()=>{closeFab();setCreating("channel");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabChannels size={17} color={accent}/><span>Создать канал</span></button>
+          <button onClick={()=>{closeFab();setCreating("group");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabGroups size={17} color={accent}/><span>Создать группу</span></button>
         </div>
       )}
 
@@ -10175,9 +10696,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
       {creating&&<CreateModal type={creating} currentUser={currentUser} profile={profile} onClose={()=>setCreating(null)} onCreated={c=>{setCreating(null);onOpen(c);}}/>}
 
       {/* ── Chat Context Menu ── */}
-      {ctxChat&&(<><div style={{position:"fixed",inset:0,zIndex:149}} onClick={()=>setCtxChat(null)}/>
+      {ctxChat&&(<><div style={{position:"fixed",inset:0,zIndex:149,background:"rgba(0,0,0,0.45)",animation:ctxClosing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={closeCtx}/>
         <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:500,background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)"}} onClick={()=>setCtxChat(null)}>
-          <div style={{position:"fixed",bottom:0,left:0,right:0,background:surface,borderRadius:"22px 22px 0 0",paddingBottom:"max(env(safe-area-inset-bottom,16px),16px)",boxShadow:"0 -8px 40px rgba(0,0,0,0.6)",animation:"slideUp 0.3s cubic-bezier(0.25,0.46,0.45,0.94)"}} onClick={e=>e.stopPropagation()}>
+          <div style={{position:"fixed",bottom:0,left:0,right:0,background:surface,borderRadius:"22px 22px 0 0",paddingBottom:"max(env(safe-area-inset-bottom,16px),16px)",boxShadow:"0 -8px 40px rgba(0,0,0,0.6)",animation:ctxClosing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
             {/* Handle */}
             <div style={{width:36,height:4,borderRadius:2,background:border,margin:"10px auto 14px"}}/>
             {/* Chat info */}
@@ -10195,9 +10716,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
               {ico:<IcArchiveBox size={19} color="#8e8e93" style={_mi}/>,lbl:getS("archive_"+ctxChat.id)?"Из архива":"В архив",fn:()=>{setS("archive_"+ctxChat.id,getS("archive_"+ctxChat.id)?0:1);setCtxChat(null);}},
               {ico:getS("mute_"+ctxChat.id)?<IcSetBell size={19} color="#8e8e93" style={_mi}/>:<IcMute size={19} color="#8e8e93" style={_mi}/>,lbl:getS("mute_"+ctxChat.id)?"Включить звук":"Выключить звук",fn:()=>muteChat(ctxChat)},
               {ico:<IcCheckOne size={19} color="#8e8e93" style={_mi}/>,lbl:"Прочитать",fn:()=>markRead(ctxChat)},
-              {ico:<IcTrash size={19} color="#ff5252" style={_mi}/>,lbl:"Очистить у себя",red:true,fn:async()=>{if(await appConfirm("Очистить историю этого чата у себя?","Очистить"))clearChatHistory(ctxChat);}},
-              {ico:<IcTrashAll size={19} color="#ff5252" style={_mi}/>,lbl:"Удалить у всех",red:true,fn:async()=>{if(await appConfirm("Удалить переписку у всех участников? Это нельзя отменить!","Удалить"))deleteChatForEveryone(ctxChat);}},
-              {ico:<IcDoor size={19} color="#ff5252" style={_mi}/>,lbl:ctxChat.type==="direct"?"Удалить чат":"Покинуть",red:true,fn:async()=>{if(await appConfirm(ctxChat.type==="direct"?"Удалить этот чат?":"Покинуть группу?",ctxChat.type==="direct"?"Удалить":"Покинуть"))deleteChat(ctxChat);}},
+              {ico:<IcTrash size={19} color="#ff5252" style={_mi}/>,lbl:"Очистить у себя",red:true,fn:async()=>{if(await appConfirm("Очистить историю этого чата у себя?","Очистить")){closeCtx();clearChatHistory(ctxChat);}}},
+              {ico:<IcTrashAll size={19} color="#ff5252" style={_mi}/>,lbl:"Удалить у всех",red:true,fn:async()=>{if(await appConfirm("Удалить переписку у всех участников? Это нельзя отменить!","Удалить")){closeCtx();deleteChatForEveryone(ctxChat);}}},
+              {ico:<IcDoor size={19} color="#ff5252" style={_mi}/>,lbl:ctxChat.type==="direct"?"Удалить чат":"Покинуть",red:true,fn:async()=>{if(await appConfirm(ctxChat.type==="direct"?"Удалить этот чат?":"Покинуть группу?",ctxChat.type==="direct"?"Удалить":"Покинуть")){const target=ctxChat;closeCtx();animatedRemoveChat(target,()=>deleteChat(target));}}},
             ].map((a,i)=>(
               <button key={i} onClick={a.fn} style={{width:"100%",display:"flex",alignItems:"center",gap:16,padding:"14px 20px",background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",transition:"background 0.15s"}}
                 onTouchStart={e=>e.currentTarget.style.background=surface2}
@@ -10278,7 +10799,10 @@ async function setupPush(uid) {
 }
 
 
-export default function App(){
+// Отладочная обёртка: падение рендера App показывает ошибку на экране
+// (через componentDidCatch → __rmgShowError), а не чёрный экран.
+export default function App(){return <__rmgErrBoundary><AppInner/></__rmgErrBoundary>;}
+function AppInner(){
   const[fbUser,setFbUser]=useState(undefined);
   const[profile,setProfile]=useState(null);
   const[screen,setScreen]=useState("list");
@@ -10509,6 +11033,10 @@ export default function App(){
       // Overlay «Настройки» (внутри ChatList) — закрывает группу или весь overlay
       if(_settingsBackHandler){try{ if(_settingsBackHandler())return; }catch(err){}}
       if(_chatBackHandler){try{ if(_chatBackHandler())return; }catch(err){}}
+      // Чат-лист: открытое меню чата / FAB-панель закрываются раньше минимизации
+      if(_chatListBackHandler){try{ if(_chatListBackHandler())return; }catch(err){}}
+      // Предпросмотр истории (композер) — закрывается раньше минимизации
+      if(_storyComposerClose){try{ _storyComposerClose(); return; }catch(err){}}
       if(screenRef.current==="chat"){setScreenAnim("toList");setTimeout(()=>setScreen("list"),320);return;}
       // На главном экране — сворачиваем, НЕ выходим
       try{
@@ -10770,14 +11298,27 @@ export default function App(){
     @keyframes msgIn{0%{opacity:0;transform:translateY(16px) scale(0.92)}50%{opacity:1;transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:none}}
     /* Баблы выезжают СБОКУ: свои — справа налево, чужие — слева направо.
        Плавно: длинный мягкий выезд + едва заметный докат, без резких пружин */
-    @keyframes msgInMe{0%{opacity:0;transform:translateX(52px)}70%{opacity:1;transform:translateX(-3px)}100%{opacity:1;transform:none}}
-    @keyframes msgInThem{0%{opacity:0;transform:translateX(-52px)}70%{opacity:1;transform:translateX(3px)}100%{opacity:1;transform:none}}
+    @keyframes msgInMe{0%{opacity:0;transform:translateX(62px)}75%{opacity:1;transform:translateX(-3px)}100%{opacity:1;transform:none}}
+    @keyframes msgInThem{0%{opacity:0;transform:translateX(-62px)}75%{opacity:1;transform:translateX(3px)}100%{opacity:1;transform:none}}
     @keyframes bubbleIn{from{opacity:0;transform:scale(0.88) translateY(6px)}to{opacity:1;transform:none}}
     @keyframes splashRing{from{transform:scale(0.88);opacity:0.7}to{transform:scale(1.3);opacity:0}}
     @keyframes circleIn{from{opacity:0;transform:scale(0.65)}to{opacity:1;transform:scale(1)}}
     @keyframes circleExpandIn{0%{opacity:0;transform:scale(0.3)}60%{transform:scale(1.05)}100%{opacity:1;transform:scale(1)}}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
     @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    /* Плавные глобальные появления/исчезновения меню и шторок (exit-варианты) */
+    @keyframes fadeInQ{from{opacity:0}to{opacity:1}}
+    @keyframes fadeOutQ{from{opacity:1}to{opacity:0}}
+    @keyframes sheetUpQ{from{transform:translateY(100%)}to{transform:translateY(0)}}
+    @keyframes sheetDownQ{from{transform:translateY(0)}to{transform:translateY(100%)}}
+    @keyframes menuPopQ{0%{opacity:0;transform:scale(0.86);transform-origin:top right}100%{opacity:1;transform:scale(1);transform-origin:top right}}
+    @keyframes menuFadeQ{from{opacity:1;transform:scale(1)}to{opacity:0;transform:scale(0.9);transform-origin:top right}}
+    @keyframes fabPopQ{from{opacity:0;transform:scale(0.8) translateY(14px)}to{opacity:1;transform:none}}
+    @keyframes fabFadeQ{from{opacity:1;transform:none}to{opacity:0;transform:scale(0.85) translateY(14px)}}
+    @keyframes screenInQ{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:none}}
+    @keyframes screenOutQ{from{opacity:1;transform:none}to{opacity:0;transform:translateY(20px)}}
+    @keyframes rowOutQ{to{opacity:0;transform:translateX(60px) scale(0.88)}}
+    @keyframes jumpFlashQ{0%{background:rgba(255,0,0,0.22)}100%{background:transparent}}
     @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
     @keyframes slideDown{from{opacity:1;transform:none}to{opacity:0;transform:translateY(20px)}}
     @keyframes emojiPanelIn{0%{opacity:0;transform:translateY(100%)}60%{opacity:1}100%{opacity:1;transform:translateY(0)}}
@@ -10929,6 +11470,7 @@ export default function App(){
     <ThemeCtx.Provider value={theme}>
       <style>{CSS}</style>
       <ConfirmHost/>
+      <PromptHost/>
       <div style={{height:"100vh",position:"relative",overflow:"hidden",animation:"fadeIn 0.4s ease both"}}>
 
         {/* ── Liquid Glass animated background ── */}
