@@ -3,7 +3,7 @@
 // (POST /upload, поле "file"), а тот хранит их в Telegram-канале.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { SERVER_HTTP, authToken } from "./core.js";
+import { apiBase, authToken, mediaUrl } from "./core.js";
 
 export function getStorage() {
   return { __rmgstorage: true };
@@ -114,7 +114,7 @@ export function uploadBytesResumable(storageRef, blob) {
     }
     if (rejectP) rejectP(err);
   };
-  xhr.open("POST", SERVER_HTTP + "/upload");
+  xhr.open("POST", apiBase() + "/upload");
   const tok = authToken();
   if (tok) xhr.setRequestHeader("Authorization", "Bearer " + tok);
   xhr.send(form);
@@ -122,6 +122,6 @@ export function uploadBytesResumable(storageRef, blob) {
 }
 
 export async function getDownloadURL(storageRef) {
-  if (storageRef && storageRef._url) return storageRef._url;
+  if (storageRef && storageRef._url) return mediaUrl(storageRef._url);
   throw new Error("Файл ещё не загружен");
 }

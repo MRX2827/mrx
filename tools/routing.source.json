@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "endpoints": [
+    { "apiBase": "https://redmrxgram.duckdns.org", "wsAuth": "query" }
+  ]
+}

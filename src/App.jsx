@@ -103,14 +103,12 @@ function useMediaSrc(chatId, msg, remote, kind) {
 }
 
 // ─── Go Server ────────────────────────────────────────────────────────────────
-const SERVER_HTTP = "https://redmrxgram.duckdns.org";
-const SERVER_WS   = "wss://redmrxgram.duckdns.org";
 
 // Нормализация медиа-URL: сервер при незаданном PUBLIC_URL писал в сообщения
 // ОТНОСИТЕЛЬНЫЕ ссылки ("/tgfile/<id>") — такие в <video>/<audio> не играют.
 // Такой URL спасаем подстановкой домена. Прямые telegram-ссылки (протухают
 // ~1 час) не чиним — их file_id неизвестен.
-const absMediaUrl=(u)=>(typeof u==="string"&&u.startsWith("/"))?SERVER_HTTP+u:u;
+const absMediaUrl=(u)=>(typeof u==="string"&&u.startsWith("/"))?apiBase()+u:u;
 
 // Совместимые вызовы данных и файлов идут на собственный сервер.
 // Firebase используется отдельно для FCM, поэтому push-плагин не алиасится.
@@ -200,7 +198,7 @@ import { App as CapApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { NativePush } from "./native-push.js";
 import { NativeMedia } from "./native-media.js";
-import { api } from "./fb/core.js";
+import { api, apiBase } from "./fb/core.js";
 
 // ── Скрытые (удалённые у себя) чаты: {chatId: момент удаления ms}. Старый формат-массив мигрируем.
 function readHidden(key){

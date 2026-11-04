@@ -3,7 +3,7 @@
 // Реализован ровно тот набор функций, который использует App.jsx.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { api, subscribe } from "./core.js";
+import { api, mediaUrl, portableMediaUrl, subscribe } from "./core.js";
 
 // ── Timestamp ───────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,7 @@ export class Timestamp {
 
 // сериализация значений перед отправкой на сервер
 function ser(v) {
+  if (typeof v === "string") return portableMediaUrl(v);
   if (v instanceof Timestamp) return { __ts__: v.toMillis() };
   if (v instanceof Date) return { __ts__: v.getTime() };
   if (Array.isArray(v)) return v.map(ser);
@@ -48,6 +49,7 @@ function ser(v) {
 
 // оживление значений, пришедших с сервера
 function rev(v) {
+  if (typeof v === "string") return mediaUrl(v);
   if (Array.isArray(v)) return v.map(rev);
   if (v && typeof v === "object") {
     if (typeof v.__ts__ === "number" && Object.keys(v).length === 1) {

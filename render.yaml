@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: mrx-recovery
+    runtime: docker
+    plan: free
+    branch: codex/recover-mrx
+    rootDir: server
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: off
+    envVars:
+      - key: JWT_SECRET
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: ALLOW_REGISTRATION
+        value: "0"
