@@ -20,6 +20,7 @@ public class MainActivity extends BridgeActivity {
         RedMrxPushPlugin.capturePushOpen(this, getIntent());
         registerPlugin(RedMrxPushPlugin.class);
         registerPlugin(RedMrxMediaPlugin.class);
+        registerPlugin(RedMrxUpdatePlugin.class);
         super.onCreate(savedInstanceState);
         installImeAnimation();
     }

@@ -1,0 +1,125 @@
+.mrx-update {
+  position: fixed;
+  z-index: 2400;
+  top: max(8px, calc(env(safe-area-inset-top, 24px) + 8px));
+  left: 0;
+  right: 0;
+  width: min(calc(100% - 16px), 480px);
+  margin-inline: auto;
+  color: #fff5f7;
+  background: #301821;
+  border: 1px solid #5b3541;
+  border-radius: 24px;
+  box-shadow: 0 12px 32px #0007;
+  transform-origin: center top;
+  animation: mrx-update-in 570ms linear both;
+}
+
+.mrx-update[data-closing="true"] {
+  pointer-events: none;
+  animation: mrx-update-out 280ms cubic-bezier(.4,0,1,1) both;
+}
+
+.mrx-update-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 8px 9px 11px;
+}
+
+.mrx-update-icon {
+  display: grid;
+  place-items: center;
+  width: 41px;
+  height: 41px;
+  flex: 0 0 auto;
+  border-radius: 15px;
+  background: #5d2838;
+  color: #ffb1c3;
+}
+
+.mrx-update-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.mrx-update-copy strong {
+  display: block;
+  font-size: 14px;
+  animation: mrx-update-text 245ms cubic-bezier(.2,.75,.22,1) both;
+}
+
+.mrx-update-copy small {
+  display: block;
+  margin-top: 3px;
+  color: #f2cbd5;
+  font-size: 11px;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+
+.mrx-update-row button {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.mrx-update-row .mrx-update-action {
+  padding: 9px 11px;
+  border-radius: 99px;
+  background: #ffb1c3;
+  color: #401324;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mrx-update-row .mrx-update-close {
+  width: 32px;
+  height: 36px;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 23px;
+}
+
+.mrx-update-progress {
+  height: 4px;
+  margin: 0 13px 10px;
+  border-radius: 10px;
+  background: #5d2838;
+  overflow: hidden;
+}
+
+.mrx-update-progress div {
+  height: 100%;
+  border-radius: inherit;
+  background: #ffb1c3;
+  transform-origin: left center;
+  transition: transform 160ms ease-out;
+}
+
+/* The AmorX banner overshoots once, then settles in the other direction. */
+@keyframes mrx-update-in {
+  0%   { opacity: 0; transform: translate3d(0, calc(-100% - 36px), 0) scale(.92); }
+  18%  { opacity: .85; transform: translate3d(0, -28%, 0) scale(.97); }
+  39%  { opacity: 1; transform: translate3d(0, 8%, 0) scale(1.015); }
+  58%  { transform: translate3d(0, -2.5%, 0) scale(.996); }
+  78%  { transform: translate3d(0, .7%, 0) scale(1.002); }
+  100% { opacity: 1; transform: none; }
+}
+
+@keyframes mrx-update-out {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translate3d(0, calc(-100% - 36px), 0) scale(.94); }
+}
+
+@keyframes mrx-update-text {
+  from { opacity: 0; transform: translate3d(0, 4px, 0); }
+  to   { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mrx-update, .mrx-update[data-closing="true"], .mrx-update-copy strong { animation: none; }
+  .mrx-update-progress div { transition: none; }
+}

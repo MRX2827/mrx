@@ -6,6 +6,7 @@ import { useEmojiMotion } from "./emoji-motion.js";
 import { ComposerIcon } from "./composer-icon.jsx";
 import { StickerPackDialog, stickerLinkId, useStickerPacks } from "./sticker-packs.jsx";
 import { chatLink, mrxLink, parseDeepLink } from "./deep-links.js";
+import { AppUpdateHost, checkForAppUpdate, hasAndroidUpdates } from "./app-update.jsx";
 import "./motion.css";
 
 // ── ОТЛАДКА (не убирать до стабилизации): любое не пойманное JS-падение
@@ -7487,6 +7488,9 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
           );
         })}
       </div>
+      {hasAndroidUpdates()&&<div style={{background:surface,borderRadius:16,overflow:"hidden",marginBottom:12}}>
+        <Row icon="⬇" label="Проверить обновления" onClick={checkForAppUpdate}/>
+      </div>}
       {/* Выйти из аккаунта — отдельная кнопка, не группа */}
       <div style={{background:surface,marginTop:8}}>
         <Row Ic={IcSetLogout} tint="#e53935" label="Выйти из аккаунта" red onClick={onLogout} chevron={false}/>
@@ -10612,7 +10616,7 @@ async function setupPush(uid) {
 
 // Отладочная обёртка: падение рендера App показывает ошибку на экране
 // (через componentDidCatch → __rmgShowError), а не чёрный экран.
-export default function App(){return <__rmgErrBoundary><AppInner/></__rmgErrBoundary>;}
+export default function App(){return <__rmgErrBoundary><AppInner/><AppUpdateHost/></__rmgErrBoundary>;}
 function AppInner(){
   const[fbUser,setFbUser]=useState(undefined);
   const[profile,setProfile]=useState(null);
