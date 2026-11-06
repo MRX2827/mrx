@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -106,6 +105,8 @@ func loadConfig() {
 	cfgMailFrom = getenv("MAIL_FROM", "")
 	if cfgNtfyURL == "" {
 		log.Println("⚠️  NTFY_URL не задан — push-уведомления отключены")
+	} else {
+		log.Println("OK: push notifications enabled (ntfy)")
 	}
 }
 
@@ -679,33 +680,39 @@ type TGResponse struct {
 
 // ── ntfy (UnifiedPush) — пуши без Google ─────────────────────────────────────────
 
-func sendNtfy(topic, title, body, chatID, senderID string) {
+var ntfyClient = &http.Client{Timeout: 10 * time.Second}
+
+func sendNtfy(topic, title, body string) {
 	if cfgNtfyURL == "" || topic == "" {
 		return
+	}
+	if cfgNtfyURL == "https://ntfy.sh" {
+		// Public ntfy topics are access-by-name. Keep chat content inside MRX.
+		title, body = "MRX", "Новое сообщение"
 	}
 	payload, _ := json.Marshal(map[string]interface{}{
 		"topic":    topic,
 		"title":    title,
 		"message":  body,
 		"priority": 4,
-		"tags":     []string{"speech_balloon"},
 	})
-	req, _ := http.NewRequest("POST", cfgNtfyURL, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", cfgNtfyURL, bytes.NewReader(payload))
+	if err != nil {
+		log.Println("ntfy: invalid publish endpoint")
+		return
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if cfgNtfyToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfgNtfyToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := ntfyClient.Do(req)
 	if err != nil {
-		log.Println("ntfy send error:", err)
+		log.Println("ntfy: publish request failed")
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
-		log.Printf("🔔 ntfy sent: %s", title)
-	} else {
-		b, _ := io.ReadAll(resp.Body)
-		log.Printf("ntfy error %d: %s", resp.StatusCode, string(b))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("ntfy: publish failed (HTTP %d)", resp.StatusCode)
 	}
 }
 
@@ -744,7 +751,7 @@ func notifyOffline(chatID string, msg Message) {
 		}
 		if !online {
 			if topic := getPushTopic(uid); topic != "" {
-				go sendNtfy(topic, title, body, chatID, msg.SenderID)
+				go sendNtfy(topic, title, body)
 			}
 		}
 	}

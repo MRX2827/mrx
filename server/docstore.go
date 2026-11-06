@@ -792,9 +792,23 @@ func dsUserInChat(uid, parent string) bool {
 	return false
 }
 
+func dsHasActiveChat(user map[string]interface{}, chatID string, now int64) bool {
+	if user["appActive"] != true || user["activeChatId"] != chatID {
+		return false
+	}
+	timestamp, _ := user["activeAt"].(map[string]interface{})
+	activeAt, ok := timestamp["__ts__"].(float64)
+	if !ok {
+		return false
+	}
+	age := now - int64(activeAt)
+	return age >= 0 && age < activeChatTTLMs
+}
+
 func dsMaybeNotify(parent, senderUID string, data map[string]interface{}) {
-	segs := strings.Split(strings.Trim(parent, "/"), "/")
-	if len(segs) != 3 || segs[0] != "chats" || segs[2] != "messages" {
+	parent = strings.Trim(parent, "/")
+	segs := strings.Split(parent, "/")
+	if cfgNtfyURL == "" || len(segs) != 3 || segs[0] != "chats" || segs[2] != "messages" {
 		return
 	}
 	chatID := segs[1]
@@ -834,18 +848,16 @@ func dsMaybeNotify(parent, senderUID string, data map[string]interface{}) {
 			if m == "" || m == senderUID {
 				continue
 			}
-			if dsUserInChat(m, strings.Trim(parent, "/")) {
-				continue // пользователь сейчас в этом чате — не шлём
-			}
-			u, ok := loadDocData("users/" + m)
-			if !ok {
+			u, _ := loadDocData("users/" + m)
+			// A WebView may stay subscribed after its activity goes to the background.
+			if dsHasActiveChat(u, chatID, time.Now().UnixMilli()) && dsUserInChat(m, parent) {
 				continue
 			}
 			topic, _ := u["fcmToken"].(string)
 			if topic == "" {
-				continue
+				topic = getPushTopic(m)
 			}
-			sendNtfy(topic, author, body, chatID, senderUID)
+			sendNtfy(topic, author, body)
 		}
 	}()
 }

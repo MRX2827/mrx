@@ -15,5 +15,7 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: NTFY_URL
+        value: https://ntfy.sh
       - key: ALLOW_REGISTRATION
         value: "0"
