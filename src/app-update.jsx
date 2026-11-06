@@ -1,16 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Capacitor, registerPlugin } from "@capacitor/core";
 import { App as CapApp } from "@capacitor/app";
+import { hasAndroidUpdates, updateCheckEvent, updater } from "./app-update-bridge.js";
 import "./app-update.css";
-
-const updater = registerPlugin("MrxUpdate");
-export const hasAndroidUpdates = () => Capacitor.getPlatform() === "android";
-const checkEvent = "mrx-check-for-update";
-
-export function checkForAppUpdate() {
-  window.dispatchEvent(new Event(checkEvent));
-}
 
 export function AppUpdateHost() {
   return hasAndroidUpdates() ? <AndroidUpdateBanner/> : null;
@@ -59,13 +51,13 @@ function AndroidUpdateBanner() {
     });
     const manualCheck = () => { check(true); };
     const online = () => { lastCheck = 0; check(); };
-    window.addEventListener(checkEvent, manualCheck);
+    window.addEventListener(updateCheckEvent, manualCheck);
     window.addEventListener("online", online);
     return () => {
       active = false;
       clearTimeout(timer);
       clearTimeout(closeTimer.current);
-      window.removeEventListener(checkEvent, manualCheck);
+      window.removeEventListener(updateCheckEvent, manualCheck);
       window.removeEventListener("online", online);
       for (const listener of [resume, download]) listener.then(handle => handle.remove()).catch(() => {});
     };

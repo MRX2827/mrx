@@ -6,7 +6,8 @@ import { useEmojiMotion } from "./emoji-motion.js";
 import { ComposerIcon } from "./composer-icon.jsx";
 import { StickerPackDialog, stickerLinkId, useStickerPacks } from "./sticker-packs.jsx";
 import { chatLink, mrxLink, parseDeepLink } from "./deep-links.js";
-import { AppUpdateHost, checkForAppUpdate, hasAndroidUpdates } from "./app-update.jsx";
+import { AppUpdateHost } from "./app-update.jsx";
+import { checkForAppUpdate, hasAndroidUpdates } from "./app-update-bridge.js";
 import "./motion.css";
 
 // ── ОТЛАДКА (не убирать до стабилизации): любое не пойманное JS-падение
