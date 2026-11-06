@@ -16,6 +16,11 @@ func chatPublic(doc map[string]interface{}) bool {
 	return tag != "" && (kind == "group" || kind == "channel")
 }
 
+func chatJoinRequiresApproval(data map[string]interface{}) bool {
+	settings, _ := data["settings"].(map[string]interface{})
+	return settings["joinApproval"] == true
+}
+
 func visibleDoc(uid, path string, data map[string]interface{}) map[string]interface{} {
 	parts := strings.Split(path, "/")
 	if len(parts) == 2 && parts[0] == "chats" {
@@ -28,6 +33,9 @@ func visibleDoc(uid, path string, data map[string]interface{}) map[string]interf
 				if value, ok := data[key]; ok {
 					out[key] = value
 				}
+			}
+			if chatJoinRequiresApproval(data) {
+				out["settings"] = map[string]interface{}{"joinApproval": true}
 			}
 			return out
 		}
@@ -151,7 +159,7 @@ func allowedWrite(uid, path, method string, patch map[string]interface{}) bool {
 		if !hasMember(old, "members", uid) {
 			memberPatch, ok := patch["members"].(map[string]interface{})
 			items, _ := memberPatch["__arrayUnion__"].([]interface{})
-			return chatPublic(old) && method == "PATCH" && fieldsOnly(patch, "members") &&
+			return chatPublic(old) && !chatJoinRequiresApproval(old) && method == "PATCH" && fieldsOnly(patch, "members") &&
 				ok && len(items) == 1 && items[0] == uid
 		}
 		if method != "PATCH" && method != "MERGE" {
