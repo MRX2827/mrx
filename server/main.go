@@ -40,13 +40,15 @@ import (
 // ── Config ────────────────────────────────────────────────────────────────────
 
 var (
-	cfgPort      string
-	cfgJWTSecret []byte
-	cfgNtfyURL   string
-	cfgNtfyToken string
-	cfgDBPath    string
-	cfgBrevoKey  string
-	cfgMailFrom  string
+	cfgPort           string
+	cfgJWTSecret      []byte
+	cfgNtfyURL        string
+	cfgNtfyToken      string
+	cfgDBPath         string
+	cfgBrevoKey       string
+	cfgBrevoSMTPLogin string
+	cfgBrevoSMTPKey   string
+	cfgMailFrom       string
 )
 
 func getenv(key, def string) string {
@@ -99,6 +101,8 @@ func loadConfig() {
 	cfgNtfyToken = getenv("NTFY_TOKEN", "")
 	cfgDBPath = getenv("DB_PATH", "rmg.db")
 	cfgBrevoKey = getenv("BREVO_API_KEY", "")
+	cfgBrevoSMTPLogin = getenv("BREVO_SMTP_LOGIN", "")
+	cfgBrevoSMTPKey = getenv("BREVO_SMTP_KEY", "")
 	cfgMailFrom = getenv("MAIL_FROM", "")
 	if cfgNtfyURL == "" {
 		log.Println("⚠️  NTFY_URL не задан — push-уведомления отключены")

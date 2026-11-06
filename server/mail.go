@@ -29,7 +29,13 @@ var (
 	mailCodeSender  = sendMailCode
 )
 
-func mailEnabled() bool { return cfgBrevoKey != "" && cfgMailFrom != "" }
+func brevoSMTPConfigured() bool {
+	return cfgBrevoSMTPLogin != "" && cfgBrevoSMTPKey != ""
+}
+
+func mailEnabled() bool {
+	return validEmail(cfgMailFrom) && (brevoSMTPConfigured() || cfgBrevoKey != "")
+}
 
 func validEmail(email string) bool {
 	if len(email) < 5 || len(email) > 120 || strings.Count(email, "@") != 1 || strings.ContainsAny(email, " \t\r\n") {
@@ -55,11 +61,14 @@ func migrateMail() {
 	if mailEnabled() {
 		log.Println("OK: mail verification enabled (Brevo)")
 	} else {
-		log.Println("WARN: BREVO_API_KEY/MAIL_FROM not set - mail verification disabled")
+		log.Println("WARN: mail sender or Brevo credentials not configured - mail verification disabled")
 	}
 }
 
 func sendMailCode(email, code string) error {
+	if brevoSMTPConfigured() {
+		return sendBrevoSMTPCode(email, code)
+	}
 	payload := map[string]interface{}{
 		"sender":      map[string]string{"name": "MRX", "email": cfgMailFrom},
 		"to":          []map[string]string{{"email": email}},
