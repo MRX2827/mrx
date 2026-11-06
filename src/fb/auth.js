@@ -238,17 +238,22 @@ export async function attachEmail(login, password, email) {
     if (e.status === 401) throw fbError("auth/invalid-credential", "Неверный логин или пароль");
     if (e.status === 429) throw fbError("auth/too-many-requests", "Подожди минуту и попробуй ещё раз");
     if (e.status === 400) throw fbError("auth/invalid-email", "Похоже, в почте опечатка — проверь её");
+    if (e.status === 503) throw fbError("auth/mail-unavailable", "Отправка писем сейчас недоступна.");
     throw fbError("auth/network-request-failed", e.message);
   }
 }
 
 export async function requestPasswordReset(login) {
-  const r = await api("/auth/reset", {
-    method: "POST",
-    body: { login: String(login || "").trim().toLowerCase().replace(/^@/, "") },
-  });
-  // r.email = masked email, r.hint = vague message if not found
-  return r;
+  try {
+    return await api("/auth/reset", {
+      method: "POST",
+      body: { login: normLogin(login) },
+    });
+  } catch (error) {
+    if (error.status === 503) throw fbError("auth/mail-unavailable", "Отправка писем сейчас недоступна.");
+    if (error.status === 429) throw fbError("auth/too-many-requests", "Подожди минуту и попробуй ещё раз.");
+    throw error;
+  }
 }
 
 export async function confirmPasswordReset(login, code, password) {

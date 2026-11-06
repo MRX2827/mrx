@@ -6,6 +6,7 @@ import { useEmojiMotion } from "./emoji-motion.js";
 import { ComposerIcon } from "./composer-icon.jsx";
 import { StickerPackDialog, stickerLinkId, useStickerPacks } from "./sticker-packs.jsx";
 import { chatLink, mrxLink, parseDeepLink } from "./deep-links.js";
+import { AccountSecurity } from "./account-security.jsx";
 import { AppUpdateHost } from "./app-update.jsx";
 import { checkForAppUpdate, hasAndroidUpdates } from "./app-update-bridge.js";
 import "./motion.css";
@@ -6249,7 +6250,7 @@ function AuthScreen({onAuth}){
     const snap=await getDoc(doc(db,"users",user.uid));
     if(snap.exists()){onAuth(user,snap.data());return;}
     const pp=pendingProfile.current||{};
-    const prof={uid:user.uid,name:pp.name||user.displayName||"Пользователь",email:pp.email||pendingEmail||"",tag:pp.tag||"",bio:"",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp()};
+    const prof={uid:user.uid,name:pp.name||user.displayName||"Пользователь",tag:pp.tag||"",bio:"",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp()};
     await setDoc(doc(db,"users",user.uid),prof);
     onAuth(user,prof);
   };
@@ -7296,46 +7297,13 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
 
   // ── Открытая группа: «Конфиденциальность» ─────────────────────────────
   if(activeGroup==="privacy"){
-    // ── Блок аккаунта: привязанная почта, смена пароля, смена почты ──────
-    // Использует существующие API-обёртки: requestPasswordReset (код на почту)
-    // и attachEmail (привязка новой почты; требует текущий пароль).
-    const[accBusy,setAccBusy]=useState(false);
-    const changePassword=async()=>{
-      if(accBusy)return;
-      const login=await appPrompt("Твой логин (тег или почта):",profile?.tag?("@"+profile.tag):"","");
-      if(!login)return;
-      setAccBusy(true);
-      try{
-        const r=await requestPasswordReset(login.trim());
-        appConfirm(r?.email?("Код отправлен на "+r.email+". Проверь почту и введи код с новым паролем на экране входа → «Забыли пароль»."):("Код отправлен (если аккаунт найден)."),"Понятно");
-      }catch(e){appConfirm("Не получилось: "+(e?.message||e),"Ок");}
-      setAccBusy(false);
-    };
-    const changeEmail=async()=>{
-      if(accBusy)return;
-      const login=await appPrompt("Твой логин (тег или почта):",profile?.tag?("@"+profile.tag):"","");
-      if(!login)return;
-      const pass=await appPrompt("Твой текущий пароль:","","Продолжить");
-      if(pass===null)return;
-      const email=await appPrompt("Новая почта:","","Привязать");
-      if(!email)return;
-      setAccBusy(true);
-      try{
-        await attachEmail(login.trim(),pass,email.trim());
-        appConfirm("Почта привязана. Может потребоваться подтверждение — проверь входящие.","Готово");
-      }catch(e){appConfirm("Не получилось: "+(e?.message||e),"Ок");}
-      setAccBusy(false);
-    };
     return(
       <div style={{background:surface,marginTop:8}}>
         <T k="showOnline"   icon={<IcDot size={20} color="#43a047" style={_mi}/>} label="Показывать онлайн"  desc="Другие видят когда ты в сети"/>
         <T k="showLastSeen" icon={<IcSetClock size={20} color="#8e8e93" style={_mi}/>} label="Последний онлайн"   desc="Другие видят когда ты последний раз был в сети"/>
         <T k="readReceipts" icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Статус прочтения"   desc="Собеседник видит что ты прочитал сообщение"/>
         <T k="showTyping"   icon={<IcPencilSm size={20} color="#8e8e93" style={_mi}/>} label="Статус «печатает»" desc="Собеседник видит когда ты печатаешь"/>
-        {/* ── Аккаунт ── */}
-        <div style={{padding:"16px 15px 6px",color:text2,fontSize:11,fontWeight:800,letterSpacing:.5}}>АККАУНТ</div>
-        <Row Ic={IcSetLock} tint="#039be5" label="Сменить пароль" val="Код подтверждения придёт на почту" onClick={changePassword}/>
-        <Row Ic={IcSetInfo} tint="#f4a231" label="Сменить почту" val="Привязать к аккаунту другой адрес" onClick={changeEmail}/>
+        <AccountSecurity key={currentUser?.uid} theme={{text,text2,surface2,border,accent}}/>
       </div>
     );
   }
