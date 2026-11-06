@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, createContext, useContext, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
+import { usePlayerSheet } from "./player-sheet.js";
+import { useChatMotion } from "./chat-motion.js";
+import { useEmojiMotion } from "./emoji-motion.js";
+import { ComposerIcon } from "./composer-icon.jsx";
+import { StickerPackDialog, stickerLinkId, useStickerPacks } from "./sticker-packs.jsx";
+import { chatLink, mrxLink, parseDeepLink } from "./deep-links.js";
+import "./motion.css";
 
 // ── ОТЛАДКА (не убирать до стабилизации): любое не пойманное JS-падение
 // показывается ПРЯМО НА ЭКРАНЕ красным текстом вместо чёрного экрана —
@@ -120,9 +127,6 @@ async function serverUpload(file, onProgress) {
     resumeMediaDownloads();
   }
 }
-async function serverRegister(user) {
-  return user || null;
-}
 async function serverSearch(query) {
   return [];
 }
@@ -198,7 +202,7 @@ import { App as CapApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { NativePush } from "./native-push.js";
 import { NativeMedia } from "./native-media.js";
-import { api, apiBase } from "./fb/core.js";
+import { api, apiBase, mediaUrl, portableMediaUrl } from "./fb/core.js";
 
 // ── Скрытые (удалённые у себя) чаты: {chatId: момент удаления ms}. Старый формат-массив мигрируем.
 function readHidden(key){
@@ -999,9 +1003,7 @@ function markMsgSeen(id){
   // Подрезаем, чтобы сет не рос бесконечно за долгую сессию
   if(MSG_SEEN_IDS.size>4000){let n=0;for(const k of MSG_SEEN_IDS){MSG_SEEN_IDS.delete(k);if(++n>=1500)break;}}
 }
-// Смена чата: история нового чата при открытии снова анимируется (каскад
-// как раньше), сет «показанных» чистим.
-function clearSeenMsgs(){MSG_SEEN_IDS.clear();}
+function markHistorySeen(messages){messages.forEach(message=>markMsgSeen(message.id));}
 
 // ─── Global Music Player ─────────────────────────────────────────────────────
 // ─── Global Audio Engine (singleton, survives React re-renders) ───────────────
@@ -1105,7 +1107,7 @@ const AUDIO_ENGINE = {
     if(!t)return "";
     const key=t.id||t.src||"";
     if(this._trackSrc.has(key))return this._trackSrc.get(key);
-    let out=t.src||"";
+    let out=absMediaUrl(t.src)||"";
     try{
       if(t.chatId&&t.id&&t.src){
         const cached=await getCachedMediaSrc(t.chatId,t.id);
@@ -1141,7 +1143,7 @@ const AUDIO_ENGINE = {
       if(this._trackSrc.get(key)===src){
         this._trackSrc.delete(key);
         if(this.track===t&&!String(t.src||"").startsWith("http")){
-          const r=this._buildEl(t.src||"");
+          const r=this._buildEl(absMediaUrl(t.src)||"");
           r.play().then(()=>{this.playing=true;this._updateMediaSession();this.notify();}).catch(()=>{});
         }
       }
@@ -1386,16 +1388,20 @@ function AudioCtxProvider({children}){
   // isDraggingRef блокирует обновление прогресса во время скрабинга seek-бара.
   const rafRef=useRef(null);
   const isDraggingRef=useRef(false);
+  const playerAnchor=useRef(null);
+  const closeFullPlayer=useCallback(()=>setState(prev=>({...prev,showFullPlayer:false})),[]);
 
   const startRAF=useCallback(()=>{
     cancelAnimationFrame(rafRef.current);
-    const tick=()=>{
+    let lastUpdate=-Infinity;
+    const tick=now=>{
       const el=AUDIO_ENGINE.el;
       if(!el||el.paused||el.ended){
         rafRef.current=null;
         return; // останавливаем RAF при паузе
       }
-      if(!isDraggingRef.current&&el.duration){
+      if(!isDraggingRef.current&&el.duration&&now-lastUpdate>=100){
+        lastUpdate=now;
         const ct=el.currentTime,dur=el.duration;
         setState(prev=>({...prev,currentTime:ct,duration:dur,progress:ct/dur}));
         AUDIO_ENGINE._updateMediaSessionPosition();
@@ -1496,8 +1502,12 @@ function AudioCtxProvider({children}){
     setShuffle:(v)=>AUDIO_ENGINE.setShuffle(v),
     removeFromQueue:(i)=>AUDIO_ENGINE.removeFromQueue(i),
     reorderQueue:(f,t)=>AUDIO_ENGINE.reorderQueue(f,t),
-    openFullPlayer:()=>setState(prev=>({...prev,showFullPlayer:true})),
-    closeFullPlayer:()=>setState(prev=>({...prev,showFullPlayer:false})),
+    playerAnchor,
+    openFullPlayer:event=>{
+      playerAnchor.current=event?.currentTarget??null;
+      setState(prev=>prev.showFullPlayer?prev:{...prev,showFullPlayer:true});
+    },
+    closeFullPlayer,
     closeMini:()=>{AUDIO_ENGINE.stop();setState(prev=>({...prev,showMini:false,showFullPlayer:false}));},
     // Expose drag flag so AudioPlayerScreen can pause RAF during scrubbing
     setSeekDragging:(v)=>{
@@ -1885,7 +1895,7 @@ function AudioBubble({msg,fromMe,audioMsgs,chatId}){
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontSize:13,fontWeight:600,color:fromMe?contrastOn(accent):text,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>{name}</div>
         <div style={{height:3,background:fromMe?mineRgba(accent,0.25):"rgba(0,0,0,0.15)",borderRadius:2,overflow:"hidden",marginBottom:4}}>
-          <div style={{height:"100%",width:(progress*100)+"%",background:fromMe?mineRgba(accent,0.85):accent,borderRadius:2,transition:"width 0.1s linear"}}/>
+          <div style={{height:"100%",transform:`scaleX(${progress})`,transformOrigin:"left",background:fromMe?mineRgba(accent,0.85):accent,borderRadius:2,transition:"transform 0.1s linear"}}/>
         </div>
         <div style={{fontSize:10,color:fromMe?mineRgba(accent,0.5):text2,display:"flex",gap:6}}>
           <span>{isActive?fmt(curTime):"0:00"}</span>{sizeMb&&<span>· {sizeMb}</span>}<span>· {ext}</span>
@@ -2354,11 +2364,48 @@ async function prefetchChat(chatId){
 // сообщение над панелью; клэмп scrollTop — без чтения scrollHeight.
 // В settle перестройки НЕТ вообще: все значения уже финальные.
 let _imeR={dock:null,list:null,spacer:null,near:null,onSettle:null};
-let _imePad=0,_imeNear=null,_imeDockH=0;
+let _imePad=0,_imeNear=null,_imeDockH=0,_emojiInset=0,_emojiReserve=0,_composerInset=-1,_composerSpacer=-1;
+let _emojiCanReserve=false;
+
+function applyComposerInset(near){
+  if(!_imeR.dock)return;
+  const inset=Math.round(Math.max(_imePad,_emojiInset));
+  if(inset!==_composerInset){
+    _composerInset=inset;
+    _imeR.dock.style.transform=inset?`translate3d(0,${-inset}px,0)`:"";
+  }
+  const reserved=_emojiCanReserve?Math.max(inset,Math.ceil(_emojiReserve)):inset;
+  const height=Math.round(_imeDockH+reserved);
+  const spacerChanged=height!==_composerSpacer;
+  if(_imeR.spacer&&spacerChanged){
+    _composerSpacer=height;
+    _imeR.spacer.style.height=height+"px";
+  }
+  if(near&&_imeR.list&&(spacerChanged||_emojiReserve)){
+    const list=_imeR.list;
+    list.scrollTop=list.scrollHeight-list.clientHeight-(reserved-inset);
+  }
+}
+
+window.rmgSetEmojiInset=(dock,height,reserve=0)=>{
+  if(!dock||dock!==_imeR.dock)return;
+  const near=_imeR.near?.();
+  if(_imeR.list&&Boolean(reserve)!==Boolean(_emojiReserve)){
+    const list=_imeR.list;
+    // Long threads reserve the space once. A short thread uses the live inset
+    // so its auto margin keeps the last message just above the composer.
+    _emojiCanReserve=!!reserve&&list.scrollHeight-list.clientHeight>Math.max(0,_composerInset);
+    list.style.overflowAnchor=reserve?"none":"";
+  }
+  _emojiInset=height;
+  _emojiReserve=reserve;
+  applyComposerInset(near);
+};
 window.__rmgImeMoving=false; // true, пока длится IME-анимация (см. onScroll)
 window.__rmgImeHasDock=()=>!!_imeR.dock; // нативный слой спрашивает, кому вести IME
 window.__rmgImeFrame=(h,sys)=>{
   const pad=Math.max(0,(h||0)-(sys||0));
+  window.__rmgStickerImeInset?.(pad);
   window.__rmgImeMoving=true;
   window.__rmgImeH=h||0; // высота клавиатуры в CSS-px — модалки с инпутами читают её
   if(!_imeR.dock)return;
@@ -2368,20 +2415,17 @@ window.__rmgImeFrame=(h,sys)=>{
     _imeDockH=_imeR.dock.offsetHeight||0;
   }
   _imePad=pad;
-  _imeR.dock.style.transform=pad?`translateY(${-pad}px)`:"";
-  if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+pad)+"px";
-  if(_imeNear){const el=_imeR.list;if(el)el.scrollTop=1000000000;}
+  applyComposerInset(_imeNear);
 };
 window.__rmgImeSettle=(h,sys)=>{
   const pad=Math.max(0,(h||0)-(sys||0));
+  window.__rmgStickerImeInset?.(pad);
   window.__rmgImeMoving=false;
   window.__rmgImeH=h||0;
   if(_imeR.dock){
     _imeDockH=_imeR.dock.offsetHeight||0;
     _imePad=pad;
-    _imeR.dock.style.transform=pad?`translateY(${-pad}px)`:"";
-    if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+pad)+"px";
-    if(_imeNear){const el=_imeR.list;if(el)el.scrollTop=1000000000;}
+    applyComposerInset(_imeNear);
   }
   _imeNear=null;
   if(_imeR.onSettle)_imeR.onSettle();
@@ -2389,11 +2433,14 @@ window.__rmgImeSettle=(h,sys)=>{
 window.__rmgImeLayout=()=>{
   if(!_imeR.dock)return;
   _imeDockH=_imeR.dock.offsetHeight||0;
-  if(_imeR.spacer)_imeR.spacer.style.height=Math.round(_imeDockH+_imePad)+"px";
+  applyComposerInset(_imeR.near?.());
 };
 window.rmgRegisterImeDock=(cfg)=>{
+  if(_imeR.list&&_emojiReserve)_imeR.list.style.overflowAnchor="";
   _imeR={dock:cfg?.dock||null,list:cfg?.list||null,spacer:cfg?.spacer||null,near:cfg?.near||null,onSettle:cfg?.onSettle||null};
-  _imePad=0;_imeNear=null;_imeDockH=0;window.__rmgImeMoving=false;
+  _imePad=0;_imeNear=null;_imeDockH=0;_emojiInset=0;_emojiReserve=0;_composerInset=-1;_composerSpacer=-1;
+  _emojiCanReserve=false;
+  window.__rmgImeMoving=false;
   if(_imeR.dock)_imeR.dock.style.transform="";
   if(_imeR.dock&&_imeR.spacer){
     _imeDockH=_imeR.dock.offsetHeight||0;
@@ -2401,27 +2448,11 @@ window.rmgRegisterImeDock=(cfg)=>{
   }
 };
 
-// ── Диплинки: https://redmrxgram.duckdns.org/u/<tag> | /channel/<tag> | /group/<tag> ──
-// Нативный intent-filter ловит ссылку, Capacitor App отдаёт её сюда.
-// Пока App не залогинился — ссылка копится в _deeplinkQueue; App-компонент
-// забирает её после загрузки профиля.
+// Ссылки из Android и сообщений ждут входа в аккаунт.
 let _deeplinkQueue=[];
-let _deeplinkHandler=null; // (type, tag) => Promise, ставит App-компонент
-const _deeplinkParse=(url)=>{
-  try{
-    const u=new URL(url);
-    // Фирменная схема mrx://u/<tag> — hostname тут "u"/"channel"/"group"
-    if(u.protocol==="mrx:")return {kind:u.hostname.toLowerCase(),tag:decodeURIComponent(u.pathname.replace(/^\//,"")).replace(/^@/,"").toLowerCase()};
-    if(u.hostname!=="redmrxgram.duckdns.org")return null;
-    const parts=u.pathname.split("/").filter(Boolean);
-    if(parts.length<2)return null;
-    const kind=parts[0].toLowerCase();
-    if(kind!=="u"&&kind!=="channel"&&kind!=="group")return null;
-    return {kind,tag:decodeURIComponent(parts[1]).replace(/^@/,"").toLowerCase()};
-  }catch{return null;}
-};
+let _deeplinkHandler=null;
 const _deeplinkDispatch=(url)=>{
-  const d=_deeplinkParse(url);
+  const d=parseDeepLink(url);
   if(!d)return;
   if(_deeplinkHandler)try{_deeplinkHandler(d.kind,d.tag);}catch{}
   else _deeplinkQueue.push(d);
@@ -2429,13 +2460,41 @@ const _deeplinkDispatch=(url)=>{
 // Регистрация обработчика + разбор накопленного
 window.rmgSetDeeplinkHandler=(fn)=>{
   _deeplinkHandler=fn||null;
+  if(!_deeplinkHandler)return;
   const q=_deeplinkQueue;_deeplinkQueue=[];
   for(const d of q)try{_deeplinkHandler(d.kind,d.tag);}catch{}
 };
 // Холодный старт: ссылка, по которой открыли приложение
-CapApp.getLaunchUrl().then(({url})=>{if(url)_deeplinkDispatch(url);}).catch(()=>{});
+CapApp.getLaunchUrl().then(launch=>{if(launch?.url)_deeplinkDispatch(launch.url);}).catch(()=>{});
 // Приложение уже открыто, юзер тапнул ссылку
 CapApp.addListener("appUrlOpen",({url})=>{_deeplinkDispatch(url);}).catch(()=>{});
+
+function useShareQr(url) {
+  const [qr,setQr]=useState(null);
+  useEffect(()=>{
+    if(!url)return;
+    let cancelled=false;
+    import("qrcode").then(mod=>(mod.default||mod).toDataURL(url,{
+      width:360,margin:4,color:{dark:"#111111",light:"#ffffff"}
+    })).then(data=>{if(!cancelled)setQr({url,data});}).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[url]);
+  return qr?.url===url?qr?.data:"";
+}
+
+function renderSharedLinks(value) {
+  if(typeof value!=="string"||!value.includes("://"))return value;
+  return value.split(/((?:https?:\/\/|mrx:\/\/)[^\s<>]+)/gi).map((part,index)=>{
+    if(index%2===0)return part;
+    const href=part.replace(/[.,!?…;)\]}]+$/,"");
+    if(!parseDeepLink(href))return part;
+    return <React.Fragment key={index}><a href={href} style={{color:"inherit"}} onClick={event=>{
+      event.preventDefault();
+      event.stopPropagation();
+      _deeplinkDispatch(href);
+    }}>{href}</a>{part.slice(href.length)}</React.Fragment>;
+  });
+}
 
 let _storyBackHandler = null;
 let _profileBackHandler = null;
@@ -3738,314 +3797,105 @@ const saveRecentEmoji = (emoji, currentList) => {
   return next;
 };
 
-function EmojiPanel({open, onEmoji, onSticker, onClose}){
+function EmojiPanel({open,dockRef,packs,onLibraryUse,onEmoji,onSticker,onPack}){
   const {surface,surface2,border,text,text2,accent}=useContext(ThemeCtx);
-  const[recent,setRecent]=useState(getRecentEmojis);
-  // tab: 0..(EMOJI_CATEGORIES.length-1) = эмодзи-категории, далее — стикерпаки
-  const[tab,setTab]=useState(()=>recent.length>0?0:1);
-  const[mounted,setMounted]=useState(open);
-  const[closing,setClosing]=useState(false);
-  const gridRef=useRef(null);
+  const [recent,setRecent]=useState(getRecentEmojis);
+  const [mode,setMode]=useState("emoji");
+  const [emojiTab,setEmojiTab]=useState(()=>recent.length?"recent":"smileys");
+  const [stickerTab,setStickerTab]=useState("built-in-0");
+  const [direction,setDirection]=useState(1);
+  const {panel,present}=useEmojiMotion(open,dockRef);
   const tabsRef=useRef(null);
+  const startTouch=useRef(null);
+  const stickerTabs=[
+    ...STICKER_PACKS.map((pack,index)=>({...pack,id:"built-in-"+index,icon:pack.stickers[0]})),
+    ...packs.map(pack=>({...pack,cover:pack.stickers[0]})),
+  ];
+  const stickers=mode==="stickers";
+  const tabs=stickers?stickerTabs:EMOJI_CATEGORIES;
+  const active=tabs.find(tab=>tab.id===(stickers?stickerTab:emojiTab))||tabs[0];
+  const items=stickers?active.stickers:active.id==="recent"?recent:active.emojis;
+  const custom=stickers&&!!active.owner;
 
-  // Lifecycle: handle open/close with exit animation
-  useEffect(()=>{
-    let t;
-    if(open){
-      setMounted(true);
-      setClosing(false);
-      // освежить недавние при открытии
-      setRecent(getRecentEmojis());
-    } else if(mounted){
-      setClosing(true);
-      t=setTimeout(()=>{setMounted(false);setClosing(false);},220);
-    }
-    return ()=>{if(t)clearTimeout(t);};
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[open]);
+  useLayoutEffect(()=>{
+    if(!open||!tabsRef.current)return;
+    const rail=tabsRef.current;
+    const selected=rail.querySelector('[aria-selected="true"]');
+    if(!selected)return;
+    const parent=rail.getBoundingClientRect();
+    const child=selected.getBoundingClientRect();
+    if(child.left>=parent.left&&child.right<=parent.right)return;
+    rail.scrollTo({left:rail.scrollLeft+(child.left-parent.left)-(parent.width-child.width)/2,
+      behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth"});
+  },[active.id,mode,open]);
 
-  // Scroll grid to top on tab change
-  useEffect(()=>{
-    if(gridRef.current)gridRef.current.scrollTop=0;
-  },[tab]);
-
-  // Scroll active tab into view in tabs bar
-  useEffect(()=>{
-    if(!tabsRef.current)return;
-    const activeBtn=tabsRef.current.querySelector(`[data-tab-idx="${tab}"]`);
-    if(activeBtn&&activeBtn.scrollIntoView){
-      try{activeBtn.scrollIntoView({behavior:"smooth",inline:"center",block:"nearest"});}catch{}
-    }
-  },[tab]);
-
-  if(!mounted)return null;
-
-  // Объединённые вкладки: эмодзи-категории + стикерпаки
-  const stickerStart=EMOJI_CATEGORIES.length;
-  const isStickerTab=tab>=stickerStart;
-  const current=isStickerTab
-    ? {...STICKER_PACKS[tab-stickerStart], type:"sticker", icon:STICKER_PACKS[tab-stickerStart].stickers[0]}
-    : {...EMOJI_CATEGORIES[tab], type:"emoji"};
-
-  let items;
-  if(isStickerTab){
-    items=STICKER_PACKS[tab-stickerStart].stickers;
-  } else if(current.id==="recent"){
-    items=recent;
-  } else {
-    items=current.emojis||[];
-  }
-
-  const handleSelect=(item)=>{
-    if(isStickerTab){
-      onSticker(item);
-    } else {
-      // Сохраняем в недавние (но не само поле «Недавние»)
-      setRecent(prev=>saveRecentEmoji(item,prev));
-      onEmoji(item);
-    }
+  const switchMode=next=>{
+    if(next===mode)return;
+    if(next==="stickers")onLibraryUse();
+    setDirection(next==="stickers"?1:-1);
+    setMode(next);
+  };
+  const selectTab=id=>{
+    if(id===active.id)return;
+    setDirection(tabs.findIndex(tab=>tab.id===id)>tabs.indexOf(active)?1:-1);
+    (stickers?setStickerTab:setEmojiTab)(id);
+  };
+  const onTouchEnd=event=>{
+    const start=startTouch.current;
+    startTouch.current=null;
+    if(!start)return;
+    const point=event.changedTouches[0];
+    const dx=point.clientX-start.clientX,dy=point.clientY-start.clientY;
+    if(Math.abs(dx)<60||Math.abs(dx)<Math.abs(dy)*1.5)return;
+    const next=tabs[tabs.indexOf(active)+(dx<0?1:-1)];
+    if(next)selectTab(next.id);
+  };
+  const select=item=>{
+    if(stickers){onSticker(item,custom?active.id:null);return;}
+    setRecent(previous=>saveRecentEmoji(item,previous));
+    onEmoji(item);
   };
 
-  // КРИТИЧНО: onMouseDown preventDefault — чтобы инпут не терял фокус,
-  // не срабатывал onBlur и не сбрасывал state. Это и есть фикс главного бага.
-  const noBlur=(e)=>e.preventDefault();
-
+  if(!present)return null;
   return(
-    <div
-      onClick={e=>e.stopPropagation()}
-      onMouseDown={noBlur}
-      style={{
-        background:surface,
-        borderTop:`1px solid ${border}`,
-        // Скруглений не делаем сверху: панель теперь прилегает прямо к инпуту,
-        // как клавиатура. Резкая граница выглядит естественней.
-        borderRadius:0,
-        boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",
-        // ~ высота экранной клавиатуры телефона
-        height:300,
-        maxHeight:"50vh",
-        display:"flex",
-        flexDirection:"column",
-        overflow:"hidden",
-        transformOrigin:"bottom center",
-        willChange:"transform,opacity",
-        animation:closing
-          ? "emojiPanelOut 0.22s cubic-bezier(0.4,0,1,1) forwards"
-          // Плавная анимация без overshoot — клавиатуры не «отскакивают»
-          : "emojiPanelIn 0.24s cubic-bezier(0.32,0.72,0,1)",
-      }}
-    >
-      {/* Header: drag-индикатор + название категории */}
-      <div style={{
-        display:"flex",
-        alignItems:"center",
-        justifyContent:"flex-start",
-        padding:"8px 14px 8px",
-        borderBottom:`1px solid ${border}`,
-        flexShrink:0,
-        background:surface,
-      }}>
-        <div style={{display:"flex",alignItems:"center",gap:8,minWidth:0,flex:1}}>
-          <span style={{fontSize:17,lineHeight:1,flexShrink:0}}>{current.icon}</span>
-          <span style={{
-            color:text,
-            fontSize:13,
-            fontWeight:700,
-            whiteSpace:"nowrap",
-            overflow:"hidden",
-            textOverflow:"ellipsis"
-          }}>
-            {isStickerTab?`Стикеры · ${current.name}`:current.name}
-          </span>
+    <section ref={panel} className="mrx-emoji-panel" inert={!open} aria-label="Эмодзи и стикеры"
+      onMouseDown={event=>event.preventDefault()} onClick={event=>event.stopPropagation()}
+      style={{"--emoji-bg":surface,"--emoji-card":surface2,"--emoji-line":border,"--emoji-text":text,"--emoji-muted":text2,"--emoji-accent":accent}}>
+      <div className="mrx-emoji-toolbar">
+        <div className="mrx-emoji-modes" data-stickers={stickers} role="tablist" aria-label="Тип панели">
+          <button role="tab" aria-selected={!stickers} onClick={()=>switchMode("emoji")}><ComposerIcon name="smile" size={17}/>Эмодзи</button>
+          <button role="tab" aria-selected={stickers} onClick={()=>switchMode("stickers")}><ComposerIcon name="sticker" size={17}/>Стикеры</button>
         </div>
       </div>
-
-      {/* Grid */}
-      <div
-        ref={gridRef}
-        className="emoji-grid-scroll"
-        style={{
-          flex:1,
-          overflowY:"auto",
-          overflowX:"hidden",
-          padding:"8px 6px 6px",
-          display:"grid",
-          gridTemplateColumns:isStickerTab
-            ? "repeat(auto-fill,minmax(58px,1fr))"
-            : "repeat(auto-fill,minmax(42px,1fr))",
-          // ВАЖНО: явно задаём высоту строк. Без этого браузер пытается
-          // вычислить высоту через aspect-ratio детей, что ломается на больших
-          // списках (Животные/Еда/Объекты/Символы) — эмодзи накладываются.
-          gridAutoRows:isStickerTab?"58px":"42px",
-          gap:2,
-          alignContent:"start",
-          minHeight:0,
-          WebkitOverflowScrolling:"touch",
-        }}
-      >
-        {items.length===0?(
-          <div style={{
-            gridColumn:"1 / -1",
-            textAlign:"center",
-            color:text2,
-            padding:"50px 20px",
-            fontSize:13,
-            lineHeight:1.5,
-            opacity:0.7,
-          }}>
-            {current.id==="recent"
-              ? <>🕒<br/>Здесь появятся недавно<br/>использованные эмодзи</>
-              : "Пусто"}
-          </div>
-        ):items.map((e,i)=>(
-          <button
-            key={`${current.id}-${i}-${e}`}
-            onMouseDown={noBlur}
-            onClick={()=>handleSelect(e)}
-            style={{
-              width:"100%",
-              height:"100%",
-              borderRadius:10,
-              border:"none",
-              background:"transparent",
-              fontSize:isStickerTab?30:24,
-              cursor:"pointer",
-              display:"flex",
-              alignItems:"center",
-              justifyContent:"center",
-              padding:0,
-              margin:0,
-              fontFamily:"inherit",
-              lineHeight:1,
-              transition:"background 0.12s, transform 0.08s",
-              WebkitTapHighlightColor:"transparent",
-              userSelect:"none",
-            }}
-            onMouseEnter={ev=>ev.currentTarget.style.background=surface2}
-            onMouseLeave={ev=>{ev.currentTarget.style.background="transparent";ev.currentTarget.style.transform="scale(1)";}}
-            onTouchStart={ev=>{ev.currentTarget.style.background=accent+"33";ev.currentTarget.style.transform="scale(1.18)";}}
-            onTouchEnd={ev=>{ev.currentTarget.style.background="transparent";ev.currentTarget.style.transform="scale(1)";}}
-            onTouchCancel={ev=>{ev.currentTarget.style.background="transparent";ev.currentTarget.style.transform="scale(1)";}}
-          >{e}</button>
+      <div className="mrx-emoji-header">
+        <strong>{active.name}</strong>
+        {stickers&&<div className="mrx-emoji-actions">
+          {custom&&<button aria-label="О наборе" title="О наборе" onClick={()=>onPack({kind:"preview",id:active.id})}><ComposerIcon name="info" size={18}/></button>}
+          <button aria-label="По ссылке" title="По ссылке" onClick={()=>onPack({kind:"link"})}><ComposerIcon name="link" size={18}/></button>
+          <button aria-label="Создать набор" title="Создать набор" onClick={()=>onPack({kind:"create"})}><ComposerIcon name="add" size={19}/></button>
+        </div>}
+      </div>
+      <div key={mode+active.id} className="mrx-emoji-grid" data-stickers={stickers}
+        style={{"--emoji-tab-offset":`${direction*12}px`}}
+        onTouchStart={event=>{startTouch.current=event.touches[0];}}
+        onTouchEnd={onTouchEnd} onTouchCancel={()=>{startTouch.current=null;}}>
+        {!items.length&&<p>Здесь появятся недавно использованные эмодзи</p>}
+        {items.map((item,index)=>(
+          <button key={index} className="mrx-emoji-item" onClick={()=>select(item)}
+            aria-label={custom?`Стикер ${index+1}`:item}>
+            {custom?<img src={mediaUrl(item)} alt="" loading="lazy" draggable={false}/>:item}
+          </button>
         ))}
       </div>
-
-      {/* Bottom tabs bar */}
-      <div
-        ref={tabsRef}
-        className="emoji-tabs-row"
-        style={{
-          display:"flex",
-          gap:2,
-          padding:"5px 6px 6px",
-          paddingBottom:"max(5px,env(safe-area-inset-bottom,5px))",
-          overflowX:"auto",
-          overflowY:"hidden",
-          borderTop:`1px solid ${border}`,
-          background:surface,
-          flexShrink:0,
-          WebkitOverflowScrolling:"touch",
-        }}
-      >
-        {EMOJI_CATEGORIES.map((c,i)=>{
-          const active=tab===i;
-          return (
-            <button
-              key={c.id}
-              data-tab-idx={i}
-              onMouseDown={noBlur}
-              onClick={()=>setTab(i)}
-              title={c.name}
-              style={{
-                flexShrink:0,
-                width:38,
-                height:38,
-                borderRadius:10,
-                border:"none",
-                background:active?accent+"22":"transparent",
-                color:active?accent:text2,
-                fontSize:19,
-                lineHeight:1,
-                cursor:"pointer",
-                display:"flex",
-                alignItems:"center",
-                justifyContent:"center",
-                position:"relative",
-                padding:0,
-                fontFamily:"inherit",
-                transition:"background 0.15s",
-                WebkitTapHighlightColor:"transparent",
-                filter:active?"none":"grayscale(0.5) opacity(0.85)",
-              }}
-            >
-              {c.icon}
-              {active&&(
-                <div style={{
-                  position:"absolute",
-                  bottom:-3,
-                  left:"50%",
-                  transform:"translateX(-50%)",
-                  width:16,
-                  height:2,
-                  borderRadius:1,
-                  background:accent,
-                }}/>
-              )}
-            </button>
-          );
-        })}
-        {/* Разделитель между эмодзи и стикерами */}
-        <div style={{flexShrink:0,width:1,margin:"6px 4px",background:border}}/>
-        {STICKER_PACKS.map((p,i)=>{
-          const tabIdx=stickerStart+i;
-          const active=tab===tabIdx;
-          return (
-            <button
-              key={p.name}
-              data-tab-idx={tabIdx}
-              onMouseDown={noBlur}
-              onClick={()=>setTab(tabIdx)}
-              title={`Стикеры: ${p.name}`}
-              style={{
-                flexShrink:0,
-                width:38,
-                height:38,
-                borderRadius:10,
-                border:"none",
-                background:active?accent+"22":"transparent",
-                color:active?accent:text2,
-                fontSize:20,
-                lineHeight:1,
-                cursor:"pointer",
-                display:"flex",
-                alignItems:"center",
-                justifyContent:"center",
-                position:"relative",
-                padding:0,
-                fontFamily:"inherit",
-                transition:"background 0.15s",
-                WebkitTapHighlightColor:"transparent",
-                filter:active?"none":"grayscale(0.5) opacity(0.85)",
-              }}
-            >
-              {p.stickers[0]}
-              {active&&(
-                <div style={{
-                  position:"absolute",
-                  bottom:-3,
-                  left:"50%",
-                  transform:"translateX(-50%)",
-                  width:16,
-                  height:2,
-                  borderRadius:1,
-                  background:accent,
-                }}/>
-              )}
-            </button>
-          );
-        })}
+      <div ref={tabsRef} className="mrx-emoji-rail" role="tablist" aria-label={stickers?"Наборы стикеров":"Категории эмодзи"}>
+        {tabs.map(tab=>(
+          <button key={tab.id} className="mrx-emoji-category" role="tab" aria-selected={tab.id===active.id}
+            aria-label={tab.name} onClick={()=>selectTab(tab.id)}>
+            {tab.cover?<img src={mediaUrl(tab.cover)} alt=""/>:tab.icon}
+          </button>
+        ))}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -4075,7 +3925,7 @@ function GroupMembersModal({chat,currentUser,onClose,showToast}){
   };
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:600,display:"flex",alignItems:"flex-end",animation:closing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={doClose}>
-      <div style={{background:surface,borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"70vh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{background:surface,borderRadius:"22px 22px 0 0",width:"100%",maxHeight:"70vh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s var(--mrx-motion-exit) forwards":"sheetUpQ var(--mrx-motion-surface) var(--mrx-motion-out)"}} onClick={e=>e.stopPropagation()}>
         <div style={{padding:"10px 16px 8px",borderBottom:`1px solid ${border}`}}>
           <div style={{width:36,height:4,background:border,borderRadius:2,margin:"0 auto 10px"}}/>
           <div style={{color:text,fontWeight:700,fontSize:16,display:"flex",alignItems:"center",gap:8}}><IcTabGroups size={18} color={accent}/>Участники ({members.length})</div>
@@ -4139,7 +3989,7 @@ function AddMembersModal({chat,currentUser,onClose}){
   };
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.75)",zIndex:500,display:"flex",alignItems:"flex-end",animation:closing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={doClose}>
-      <div style={{background:surface,borderRadius:"24px 24px 0 0",padding:24,width:"100%",maxHeight:"75dvh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)",transform:imeH?`translateY(${-imeH}px)`:"none",transition:"transform 0.25s cubic-bezier(0.22,1,0.36,1)",boxShadow:imeH?"0 -12px 40px rgba(0,0,0,0.55)":"none"}} onClick={e=>e.stopPropagation()}>
+      <div style={{background:surface,borderRadius:"24px 24px 0 0",padding:24,width:"100%",maxHeight:"75dvh",display:"flex",flexDirection:"column",animation:closing?"sheetDownQ 0.3s var(--mrx-motion-exit) forwards":"sheetUpQ var(--mrx-motion-surface) var(--mrx-motion-out)",transform:imeH?`translateY(${-imeH}px)`:"none",transition:"transform 0.25s cubic-bezier(0.22,1,0.36,1)",boxShadow:imeH?"0 -12px 40px rgba(0,0,0,0.55)":"none"}} onClick={e=>e.stopPropagation()}>
         <div style={{width:36,height:4,background:border,borderRadius:2,margin:"0 auto 18px"}}/>
         <div style={{color:text,fontWeight:700,fontSize:17,marginBottom:14,display:"flex",alignItems:"center",gap:8}}><IcTabGroups size={18} color={accent}/>Добавить участников</div>
         <div style={{display:"flex",gap:8,marginBottom:14}}>
@@ -4171,7 +4021,11 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
   const[idx,setIdx]=useState(startIndex);
   const[showUi,setShowUi]=useState(true);
   const[paused,setPaused]=useState(false);
-  const[storyProgress,setStoryProgress]=useState(0);
+  const[storyDirection,setStoryDirection]=useState(null);
+  const progressBar=useRef(null);
+  const setStoryProgress=useCallback(progress=>{
+    if(progressBar.current)progressBar.current.style.transform=`scaleX(${progress})`;
+  },[]);
   const[liked,setLiked]=useState(false);
   const[views,setViews]=useState([]);
   const[likes,setLikes]=useState([]);
@@ -4189,9 +4043,18 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
   const pressRef=useRef({x:0,y:0,holding:false,t:null,startTime:0,duration:0,dragged:false});
   const story=items[idx];
   const mine=story?.uid===currentUser.uid;
-  const close=useCallback(()=>{setClosing(true);setTimeout(()=>onClose?.(),220);},[onClose]);
-  const next=useCallback(()=>setIdx(i=>i<items.length-1?i+1:(close(),i)),[items.length,close]);
-  const prev=useCallback(()=>setIdx(i=>i>0?i-1:i),[]);
+  const close=useCallback(()=>setClosing(true),[]);
+  const next=useCallback(()=>{
+    if(closing)return;
+    if(idx===items.length-1){close();return;}
+    setStoryDirection("next");
+    setIdx(idx+1);
+  },[idx,items.length,close,closing]);
+  const prev=useCallback(()=>{
+    if(closing||idx===0)return;
+    setStoryDirection("prev");
+    setIdx(idx-1);
+  },[idx,closing]);
 
   useEffect(()=>{
     const back=e=>{try{e?.preventDefault?.();e?.stopPropagation?.();}catch{}close();return true;};
@@ -4213,7 +4076,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
     setShowViews(false);
     setShowLikes(false);
     setShowActions(false);
-  },[idx]);
+  },[idx,setStoryProgress]);
 
   useEffect(()=>{pausedRef.current=paused;},[paused]);
 
@@ -4238,7 +4101,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
   },[story?.id,currentUser.uid,profile?.name,profile?.photo]);
 
   useEffect(()=>{
-    if(!story)return;
+    if(!story||closing)return;
     let raf=0;
     let start=performance.now();
     let pausedAt=0;
@@ -4269,7 +4132,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
     };
     raf=requestAnimationFrame(tick);
     return()=>cancelAnimationFrame(raf);
-  },[story?.id,story?.mediaType,next]);
+  },[story?.id,story?.mediaType,next,closing,setStoryProgress]);
 
   useEffect(()=>{
     const v=videoRef.current;
@@ -4404,24 +4267,23 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
   };
 
   return createPortal(
-    <div className="rmg-story-viewer" onPointerDown={storyPointerDown} onPointerMove={storyPointerMove} onPointerUp={storyPointerUp} onPointerCancel={storyPointerCancel} style={{position:"fixed",inset:0,zIndex:5000,background:"#000",overflow:"hidden",touchAction:"none",animation:closing?"storyOut .22s cubic-bezier(0.4,0,0.2,1) forwards":"storyIn .28s cubic-bezier(0.22,0.61,0.36,1)"}}>
+    <div className="rmg-story-viewer"
+      onAnimationEnd={event=>{if(event.target===event.currentTarget&&event.animationName==="storyOut")onClose?.();}}
+      onPointerDown={storyPointerDown} onPointerMove={storyPointerMove} onPointerUp={storyPointerUp} onPointerCancel={storyPointerCancel} style={{position:"fixed",inset:0,zIndex:5000,background:"#000",overflow:"hidden",touchAction:"none",animation:closing?"storyOut var(--mrx-motion-control) var(--mrx-motion-exit) forwards":"storyIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
       <style>{`.rmg-story-viewer > button[data-story-control="1"]{display:none!important}`}</style>
       {story.mediaType==="video"?(
-        <video ref={videoRef} src={story.mediaUrl} poster={story.videoThumb||""} autoPlay playsInline onEnded={next}
-          style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"contain",background:"#000"}}/>
-      ):( 
-        <img src={story.mediaUrl} alt="" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"contain",background:"#000"}}/>
+        <video key={story.id} ref={videoRef} className="mrx-story-media" data-direction={storyDirection}
+          src={story.mediaUrl} poster={story.videoThumb||""} autoPlay playsInline onEnded={next}/>
+      ):(
+        <img key={story.id} className="mrx-story-media" data-direction={storyDirection} src={story.mediaUrl} alt=""/>
       )}
       <div style={{position:"absolute",left:0,right:0,top:0,zIndex:4,padding:"max(env(safe-area-inset-top,24px),22px) 12px 14px",background:"linear-gradient(to bottom,rgba(0,0,0,.82),transparent)",opacity:showUi?1:0,transform:showUi?"translateY(0)":"translateY(-16px)",transition:"opacity .25s,transform .25s",pointerEvents:showUi?"auto":"none"}}>
         <div style={{display:"flex",gap:4,marginBottom:12}}>
-          {items.map((_,i)=>{
-            const fill=i<idx?1:i===idx?storyProgress:0;
-            return(
-              <div key={i} style={{height:3,flex:1,borderRadius:4,background:"rgba(255,255,255,.25)",overflow:"hidden"}}>
-                <div style={{height:"100%",width:`${Math.max(0,Math.min(1,fill))*100}%`,borderRadius:4,background:"#fff",transition:story.mediaType==="video"?"width .12s linear":"width .08s linear"}}/>
-              </div>
-            );
-          })}
+          {items.map((item,i)=>(
+            <div key={item.id} style={{height:3,flex:1,borderRadius:4,background:"rgba(255,255,255,.25)",overflow:"hidden"}}>
+              <div ref={i===idx?progressBar:null} className="mrx-story-progress" style={{transform:`scaleX(${i<idx?1:0})`}}/>
+            </div>
+          ))}
         </div>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <Avatar name={story.author||"?"} photo={story.authorPhoto} size={38}/>
@@ -4441,7 +4303,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
       </div>
       {showViews&&(
         <div data-story-control="1" onClick={e=>{e.stopPropagation();setShowViews(false);}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"flex-end"}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxHeight:"58vh",overflowY:"auto",background:surface,borderRadius:"22px 22px 0 0",borderTop:`1px solid ${border}`,padding:"12px 0 max(env(safe-area-inset-bottom,18px),18px)",animation:"sheetUp .22s cubic-bezier(.22,.61,.36,1)"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxHeight:"58vh",overflowY:"auto",background:surface,borderRadius:"22px 22px 0 0",borderTop:`1px solid ${border}`,padding:"12px 0 max(env(safe-area-inset-bottom,18px),18px)",animation:"sheetUp var(--mrx-motion-control) var(--mrx-motion-out)"}}>
             <div style={{width:42,height:4,borderRadius:3,background:border,margin:"0 auto 12px"}}/>
             <div style={{color:text,fontWeight:800,fontSize:16,padding:"0 18px 10px"}}>Просмотры</div>
             {views.length===0&&<div style={{color:text2,padding:"18px",textAlign:"center"}}>Пока никто не смотрел</div>}
@@ -4451,7 +4313,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
       )}
       {showLikes&&(
         <div data-story-control="1" onClick={e=>{e.stopPropagation();setShowLikes(false);}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"flex-end",zIndex:2}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxHeight:"58vh",overflowY:"auto",background:surface,borderRadius:"22px 22px 0 0",borderTop:`1px solid ${border}`,padding:"12px 0 max(env(safe-area-inset-bottom,18px),18px)",animation:"sheetUp .22s cubic-bezier(.22,.61,.36,1)"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxHeight:"58vh",overflowY:"auto",background:surface,borderRadius:"22px 22px 0 0",borderTop:`1px solid ${border}`,padding:"12px 0 max(env(safe-area-inset-bottom,18px),18px)",animation:"sheetUp var(--mrx-motion-control) var(--mrx-motion-out)"}}>
             <div style={{width:42,height:4,borderRadius:3,background:border,margin:"0 auto 12px"}}/>
             <div style={{color:text,fontWeight:800,fontSize:16,padding:"0 18px 10px"}}>Кто поставил лайк</div>
             {likes.length===0&&<div style={{color:text2,padding:"18px",textAlign:"center"}}>Пока лайков нет</div>}
@@ -4461,7 +4323,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
       )}
       {showActions&&(
         <div data-story-control="1" onClick={e=>{e.stopPropagation();closeActions();}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,.42)",display:"flex",alignItems:"flex-end",zIndex:2,animation:actionsClosing?"fadeOutQ 0.26s ease forwards":"fadeInQ 0.22s ease"}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:"rgba(18,18,18,.94)",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",borderRadius:"22px 22px 0 0",borderTop:"1px solid rgba(255,255,255,.12)",padding:"10px 12px max(env(safe-area-inset-bottom,18px),18px)",animation:actionsClosing?"sheetDownQ 0.26s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ .28s cubic-bezier(0.22,1,0.36,1)"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:"rgba(18,18,18,.94)",backdropFilter:"blur(24px)",WebkitBackdropFilter:"blur(24px)",borderRadius:"22px 22px 0 0",borderTop:"1px solid rgba(255,255,255,.12)",padding:"10px 12px max(env(safe-area-inset-bottom,18px),18px)",animation:actionsClosing?"sheetDownQ 0.26s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 260ms var(--mrx-motion-out)"}}>
             <div style={{width:42,height:4,borderRadius:3,background:"rgba(255,255,255,.22)",margin:"0 auto 10px"}}/>
             <button onClick={downloadStory} disabled={actionBusy} style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"14px 12px",background:"transparent",border:"none",borderBottom:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:15,fontWeight:700,fontFamily:"inherit",opacity:actionBusy?0.7:1}}>
               <span style={{width:26,textAlign:"center",display:"inline-flex",alignItems:"center",justifyContent:"center"}}><IcSetDownload size={18} color="#fff"/></span> Скачать
@@ -4487,7 +4349,7 @@ function StoryViewer({items,startIndex=0,currentUser,profile,onClose}){
       )}
       {confirmDelete&&(
         <div data-story-control="1" onClick={e=>{e.stopPropagation();setConfirmDelete(false);}} style={{position:"absolute",inset:0,zIndex:4,background:"rgba(0,0,0,.58)",display:"flex",alignItems:"center",justifyContent:"center",padding:22}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:"min(360px,100%)",background:"rgba(22,22,22,.96)",border:"1px solid rgba(255,255,255,.12)",borderRadius:20,padding:18,boxShadow:"0 20px 60px rgba(0,0,0,.7)",backdropFilter:"blur(22px)",WebkitBackdropFilter:"blur(22px)",animation:"modalPop .2s cubic-bezier(.22,.61,.36,1)"}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:"min(360px,100%)",background:"rgba(22,22,22,.96)",border:"1px solid rgba(255,255,255,.12)",borderRadius:20,padding:18,boxShadow:"0 20px 60px rgba(0,0,0,.7)",backdropFilter:"blur(22px)",WebkitBackdropFilter:"blur(22px)",animation:"modalPop var(--mrx-motion-control) var(--mrx-motion-out)"}}>
             <div style={{color:"#fff",fontWeight:900,fontSize:18,marginBottom:8}}>Удалить историю?</div>
             <div style={{color:"rgba(255,255,255,.72)",fontSize:14,lineHeight:1.45,marginBottom:16}}>Вы действительно хотите удалить историю? Это действие нельзя отменить.</div>
             <div style={{display:"flex",gap:10}}>
@@ -4628,8 +4490,8 @@ function StoriesBar({currentUser,profile}){
           </div>
           <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:12,overflow:"hidden"}}>
             {composer.isVideo
-              ?<video src={composer.url} loop autoPlay playsInline style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}/>
-              :<img src={composer.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}/>}
+              ?<video src={composer.url} loop autoPlay playsInline style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}/>
+              :<img src={composer.url} alt="" style={{maxWidth:"100%",maxHeight:"100%",borderRadius:16,animation:"popIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}/>}
           </div>
           <div style={{padding:"14px 18px max(env(safe-area-inset-bottom,18px),18px)",display:"flex",flexDirection:"column",gap:10,animation:"slideUp 0.3s ease"}}>
             <div style={{color:"rgba(255,255,255,0.55)",fontSize:12,textAlign:"center"}}>
@@ -4722,7 +4584,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const[profileStories,setProfileStories]=useState([]);
   const[profileViewer,setProfileViewer]=useState(null);
   const[myProfile,setMyProfile]=useState(null);
-  const[qrDataUrl,setQrDataUrl]=useState("");
+  const profileLink=user&&uid?mrxLink("u",user.tag||uid):"";
+  const qrDataUrl=useShareQr(profileLink);
   const[closing,setClosing]=useState(false);
   const[avatarBusy,setAvatarBusy]=useState(false);
   const[achPage,setAchPage]=useState(0);
@@ -4799,15 +4662,6 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
     setDraftTag(user.tag||"");
     setDraftBio(user.bio||"");
   },[isMe,user?.name,user?.tag,user?.bio]);
-
-  useEffect(()=>{
-    if(!uid||!user)return;
-    const link=`https://redmrxgram.duckdns.org/u/${encodeURIComponent(user.tag||uid)}`;
-    import("qrcode").then(mod=>{
-      const QR=mod.default||mod;
-      return QR.toDataURL(link,{width:360,margin:1,color:{dark:"#111111",light:"#ffffff"}});
-    }).then(setQrDataUrl).catch(()=>setQrDataUrl(""));
-  },[uid,user?.tag]);
 
   useEffect(()=>{
     if(!uid||!myUid)return;
@@ -4943,15 +4797,23 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
     const url=URL.createObjectURL(file);
     const img=new Image();img.src=url;
     img.onerror=()=>{setBgBusy(false);URL.revokeObjectURL(url);};
-    img.onload=async()=>{
+    img.onload=()=>{
       const maxW=800,scale=Math.min(1,maxW/img.width);
       const w=Math.round(img.width*scale),h=Math.round(img.height*scale);
       const canvas=document.createElement("canvas");
       canvas.width=w;canvas.height=h;
       canvas.getContext("2d").drawImage(img,0,0,w,h);
-      const b64=canvas.toDataURL("image/jpeg",0.75);
       URL.revokeObjectURL(url);
-      await saveBackground(b64);
+      canvas.toBlob(async blob=>{
+        try{
+          if(!blob)throw new Error("Could not encode profile background");
+          const file=new File([blob],"profile-background.jpg",{type:blob.type});
+          await saveBackground(await uploadFileToFirebase(file,"profile-backgrounds"));
+        }catch(e){
+          setBgBusy(false);
+          setProfileError("Не удалось загрузить фон профиля.");
+        }
+      },"image/jpeg",0.75);
     };
   };
   const toggleBg=async()=>{
@@ -5054,7 +4916,6 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   const color=profileTone||colorFor(user.name||"?");
   const profileAccent=color;
   const hasPhoto=!!user.photo;
-  const profileLink=`https://redmrxgram.duckdns.org/u/${encodeURIComponent(user.tag||uid)}`;
   const profileBg=(!bg||bg==="transparent"||String(bg).includes("rgba"))?"#050505":bg;
   const profileSurface=(String(surface).includes("rgba")||surface==="transparent")?"#120203":surface;
   // Скрытые достижения видны только их обладателям: для всех остальных их
@@ -5069,8 +4930,8 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:600,backgroundColor:"#050505",backgroundImage:`linear-gradient(180deg,${alphaColor(profileAccent,.2)} 0%,#050505 290px,${profileBg} 100%)`,
       display:"block",overflowY:"auto",overflowX:"hidden",
-      animation:closing?"profileOut .24s cubic-bezier(0.4,0,0.2,1) forwards":"pageSlideIn 0.3s cubic-bezier(0.25,0.46,0.45,0.94)",
-      WebkitAnimation:closing?"profileOut .24s cubic-bezier(0.4,0,0.2,1) forwards":"pageSlideIn 0.3s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
+      animation:closing?"profileOut 240ms var(--mrx-motion-exit) forwards":"profileIn var(--mrx-motion-surface) var(--mrx-motion-out)",
+      WebkitAnimation:closing?"profileOut 240ms var(--mrx-motion-exit) forwards":"profileIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
 
       {showMenu&&<div onClick={closeProfileMenu} style={{position:"fixed",inset:0,zIndex:39,background:"transparent"}}/>}
       <input ref={avatarFileRef} type="file" accept="image/*" onChange={pickAvatar} style={{display:"none"}}/>
@@ -5080,7 +4941,7 @@ function ProfileView({uid,myUid,onClose,onStartChat,onProfileChange}){
         background:`radial-gradient(circle at 50% -10%,${alphaColor(profileAccent,.42)} 0%,transparent 48%),linear-gradient(180deg,${alphaColor(profileAccent,.16)} 0%,rgba(0,0,0,.78) 72%,#050505 100%),#050505`}}>
         {user.bgPhoto&&(
           <>
-            <img src={user.bgPhoto} alt="" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:0,pointerEvents:"none"}}/>
+            <img src={absMediaUrl(user.bgPhoto)} alt="" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:0,pointerEvents:"none"}}/>
             <div style={{position:"absolute",inset:0,zIndex:1,pointerEvents:"none",
               background:`radial-gradient(circle at 50% -10%,${alphaColor(profileAccent,.32)} 0%,transparent 48%),linear-gradient(180deg,rgba(0,0,0,.35) 0%,rgba(0,0,0,.82) 72%,#050505 100%)`}}/>
           </>
@@ -5372,7 +5233,7 @@ function FindPeople({currentUser,profile,onClose,onStartChat}){
     },{merge:true});
   };
   return(
-    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",zIndex:100,display:"flex",flexDirection:"column",overflowY:"auto",animation:closing?"screenOutQ 0.25s ease forwards":"screenInQ 0.28s cubic-bezier(0.22,1,0.36,1)"}}>
+    <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",zIndex:100,display:"flex",flexDirection:"column",overflowY:"auto",animation:closing?"screenOutQ 0.25s ease forwards":"screenInQ var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
       <div style={{background:bg,height:"100vh",display:"flex",flexDirection:"column"}}>
         <div style={{padding:"13px 15px",background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:11}}>
           <button onClick={doClose} style={{background:"none",border:"none",color:accent,fontSize:22,cursor:"pointer"}}>←</button>
@@ -5529,8 +5390,8 @@ function CreateModal({type,currentUser,profile,onClose,onCreated}){
   };
   const create=async()=>{
     if(!chatName.trim())return;setLoading(true);
-    try{const tag2=chatName.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/gi,"")+Math.floor(100+Math.random()*900);
-      const r=await addDoc(collection(db,"chats"),{type,name:chatName.trim(),desc,tag:tag2,members:[currentUser.uid],creatorUid:currentUser.uid,creatorName:profile.name,created:serverTimestamp(),lastMsg:"",lastTime:"",photo:photo||null,inviteLink:`https://redmrxgram.duckdns.org/${type}/${tag2}`});
+    try{const tag2=chatName.toLowerCase().replace(/\s+/g,"_").replace(/[^a-z0-9_]/gi,"").slice(0,100)+Math.floor(100+Math.random()*900);
+      const r=await addDoc(collection(db,"chats"),{type,name:chatName.trim(),desc,tag:tag2,members:[currentUser.uid],creatorUid:currentUser.uid,creatorName:profile.name,created:serverTimestamp(),lastMsg:"",lastTime:"",photo:photo||null,inviteLink:mrxLink(type,tag2)});
       if(type==="group")updateDoc(doc(db,"users",currentUser.uid),{hasCreatedGroup:true}).catch(()=>{});
       onCreated({id:r.id,type,name:chatName.trim(),desc,tag:tag2,photo:photo||null,creatorUid:currentUser.uid,members:[currentUser.uid]});}
     catch(e){alert("Ошибка: "+e.message);}
@@ -5579,8 +5440,8 @@ function ChatSettingsModal({chat,currentUser,onClose,onSaved}){
     reactionsEnabled:chat?.settings?.reactionsEnabled!==false,
   }));
   const photoRef=useRef(null);
-  const cleanTag=tag.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase();
-  const inviteLink=`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag||chat?.id}`;
+  const cleanTag=tag.replace(/^@/,"").replace(/[^a-z0-9_]/gi,"").toLowerCase().slice(0,180);
+  const inviteLink=chatLink({...chat,tag:cleanTag});
   // ВАЖНО: беру СВЕЖЕСГЕНЕРИРОВАННУЮ ссылку, а не chat.inviteLink из базы:
   // старые чаты хранят ссылки с несуществующего домена redmrxgram.app.
   const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
@@ -5696,22 +5557,15 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const[closing,setClosing]=useState(false);
   const[closeToSettings,setCloseToSettings]=useState(false);
-  const isChannel=chat?.type==="channel";
-  const canManage=chat?.creatorUid===currentUser?.uid||(chat?.admins||[]).includes(currentUser?.uid);
-  const[qrDataUrl,setQrDataUrl]=useState("");
-  const tone=colorFor(chat?.name||"?");
-  const cleanTag=(chat?.tag||chat?.id||"").replace(/^@/,"");
-  // БД-ссылки (chat.inviteLink) игнорируем: у старых чатов там мёртвый
-  // домен redmrxgram.app. Всегда генерируем заново по тегу.
-  const inviteLink=`https://redmrxgram.duckdns.org/${isChannel?"channel":"group"}/${cleanTag}`;
-
-  useEffect(()=>{
-    if(!inviteLink)return;
-    import("qrcode").then(mod=>{
-      const QR=mod.default||mod;
-      return QR.toDataURL(inviteLink,{width:340,margin:1,color:{dark:"#111111",light:"#ffffff"}});
-    }).then(setQrDataUrl).catch(()=>setQrDataUrl(""));
-  },[inviteLink]);
+  const isChannel=chat.type==="channel";
+  const isGroup=chat.type==="group";
+  const isCommunity=isChannel||isGroup;
+  const canManage=isCommunity&&(chat.creatorUid===currentUser?.uid||(chat.admins||[]).includes(currentUser?.uid));
+  const tone=colorFor(chat.name||"?");
+  const cleanTag=(chat.tag||"").replace(/^@/,"");
+  const inviteLink=chatLink(chat);
+  const qrDataUrl=useShareQr(inviteLink);
+  const title=isChannel?"Канал":isGroup?"Группа":"Личный чат";
 
   const requestClose=useCallback(()=>{
     if(closing)return;
@@ -5749,7 +5603,7 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
       <div style={{position:"relative",padding:"max(env(safe-area-inset-top,24px),24px) 18px 20px",background:`radial-gradient(circle at 50% -10%,${alphaColor(tone,.42)} 0%,transparent 48%),linear-gradient(180deg,${alphaColor(tone,.16)} 0%,rgba(0,0,0,.78) 72%,#050505 100%),#050505`}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:18}}>
           <button onClick={requestClose} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>←</button>
-          <div style={{color:"#fff",fontWeight:900,fontSize:23,letterSpacing:0}}>{isChannel?"Канал":"Группа"}</div>
+          <div style={{color:"#fff",fontWeight:900,fontSize:23,letterSpacing:0}}>{title}</div>
           <button onClick={canManage?requestOpenSettings:shareLink} style={{width:50,height:50,borderRadius:"50%",background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.1)",color:"#fff",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>{canManage?"⚙":"↗"}</button>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",textAlign:"center"}}>
@@ -5757,16 +5611,16 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
             <Avatar name={chat?.name||"?"} photo={chat?.photo} size={116}/>
           </div>
           <div style={{color:"#fff",fontWeight:1000,fontSize:28,lineHeight:1.1,marginTop:18,letterSpacing:0}}>{chat?.name||"Без названия"}</div>
-          <div style={{color:tone,fontSize:16,fontWeight:800,marginTop:7}}>@{cleanTag||chat?.id}</div>
-          <div style={{color:"rgba(255,255,255,.55)",fontSize:14,marginTop:8,lineHeight:1.35}}>{isChannel?"Канал":"Группа"} · {(chat?.members||[]).length||1} участников</div>
+          {cleanTag&&<div style={{color:tone,fontSize:16,fontWeight:800,marginTop:7}}>@{cleanTag}</div>}
+          <div style={{color:"rgba(255,255,255,.55)",fontSize:14,marginTop:8,lineHeight:1.35}}>{isCommunity?`${title} · ${(chat.members||[]).length||1} участников`:"Ссылка для участников чата"}</div>
         </div>
       </div>
 
       <div style={{padding:"14px 14px max(env(safe-area-inset-bottom,18px),18px)"}}>
-        <div style={{background:surface,borderRadius:16,padding:"13px 16px",marginBottom:12}}>
+        {isCommunity&&<div style={{background:surface,borderRadius:16,padding:"13px 16px",marginBottom:12}}>
           <div style={{color:text2,fontSize:11,fontWeight:900,letterSpacing:.8,marginBottom:6}}>ОПИСАНИЕ</div>
           <div style={{color:text,fontSize:14,lineHeight:1.55}}>{chat?.desc||"Описание пока не добавлено"}</div>
-        </div>
+        </div>}
 
         <div style={{background:surface,borderRadius:16,overflow:"hidden",marginBottom:12}}>
           <div style={{display:"flex",alignItems:"center",gap:12,padding:"13px 16px",borderBottom:`1px solid ${border}`}}>
@@ -5783,7 +5637,7 @@ function ChatInfoModal({chat,currentUser,onClose,onOpenSettings}){
         </div>
 
         <div style={{background:surface,borderRadius:16,overflow:"hidden",marginBottom:14,padding:"18px 14px",textAlign:"center"}}>
-          <div style={{color:text,fontWeight:900,fontSize:19,marginBottom:14}}>QR-код {isChannel?"канала":"группы"}</div>
+          <div style={{color:text,fontWeight:900,fontSize:19,marginBottom:14}}>QR-код {isChannel?"канала":isGroup?"группы":"чата"}</div>
           <div style={{display:"flex",justifyContent:"center"}}>
             <div style={{background:"#fff",borderRadius:22,padding:14,boxShadow:"0 10px 30px rgba(0,0,0,.35)"}}>
               {qrDataUrl?<img src={qrDataUrl} alt="QR" style={{width:190,height:190,display:"block"}}/>:<div style={{width:190,height:190,display:"flex",alignItems:"center",justifyContent:"center",color:"#111",fontWeight:800}}>QR</div>}
@@ -6102,7 +5956,7 @@ function Lightbox({src,fileName,fileType,originRect,onClose}){
           style={{position:"absolute",inset:0,
             display:"flex",alignItems:"center",justifyContent:"center",
             transform:wrapperTransform,
-            transition:"transform 0.32s cubic-bezier(0.25,0.46,0.45,0.94)",
+            transition:"transform 0.32s var(--mrx-motion-out)",
             willChange:"transform",
             transformOrigin:"center center"}}>
           <img src={src} alt={fileName||"Фото"}
@@ -6120,7 +5974,7 @@ function Lightbox({src,fileName,fileType,originRect,onClose}){
         <div onClick={handleBack}
           style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",
             transform:wrapperTransform,
-            transition:"transform 0.32s cubic-bezier(0.25,0.46,0.45,0.94)",
+            transition:"transform 0.32s var(--mrx-motion-out)",
             willChange:"transform",
             transformOrigin:"center center",
             padding:16}}>
@@ -6138,7 +5992,7 @@ function Lightbox({src,fileName,fileType,originRect,onClose}){
           <div onClick={e=>e.stopPropagation()}
             style={{background:"#1a1a1a",borderRadius:20,padding:28,textAlign:"center",width:"100%",maxWidth:320,
               transform:inPhase?"scale(1)":"scale(0.92)",
-              transition:"transform 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}>
+              transition:"transform var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
             <div style={{marginBottom:16,display:"flex",justifyContent:"center"}}><IcMusicNote size={52} color="#E53935"/></div>
             <div style={{color:"#fff",fontWeight:600,fontSize:15,marginBottom:20,wordBreak:"break-word"}}>{fileName}</div>
             <audio src={src} controls style={{width:"100%"}}/>
@@ -6155,7 +6009,7 @@ function Lightbox({src,fileName,fileType,originRect,onClose}){
           <div onClick={e=>e.stopPropagation()}
             style={{background:"#1a1a1a",borderRadius:20,padding:32,textAlign:"center",maxWidth:320,
               transform:inPhase?"scale(1)":"scale(0.92)",
-              transition:"transform 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}>
+              transition:"transform var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
             <div style={{fontSize:52,marginBottom:12}}>📄</div>
             <div style={{color:"#fff",fontWeight:600,fontSize:15,marginBottom:8,wordBreak:"break-word"}}>{fileName}</div>
             <button onClick={download} disabled={downloading} style={{background:"#E53935",border:"none",borderRadius:14,padding:"13px 28px",color:"#fff",fontSize:15,fontWeight:700,cursor:downloading?"default":"pointer",opacity:downloading?0.6:1,transition:"opacity 0.2s",marginTop:12}}>{downloading?"⏳ Сохраняем…":"⬇ Скачать файл"}</button>
@@ -6321,7 +6175,7 @@ function MsgContextMenu({msg,myUid,chatId,onClose,onReply,onEdit,onForward,onSav
             }} style={{
               background:"none",border:"none",fontSize:26,cursor:"pointer",padding:"4px 6px",
               borderRadius:12,transition:"transform 0.2s cubic-bezier(0.34,1.56,0.64,1)",
-              animation:`popIn 0.3s cubic-bezier(0.34,1.56,0.64,1) ${i*0.04}s both`,
+              animation:`popIn var(--mrx-motion-surface) var(--mrx-motion-out) ${i*0.04}s both`,
             }}
             onTouchStart={e=>e.currentTarget.style.transform="scale(1.35)"}
             onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}>{r}</button>
@@ -6355,8 +6209,7 @@ function Screen({children,dir="right"}){
   return(
     <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:100,
       background:theme?.bg||"#0A0A0A",
-      animation:"pageSlideIn 0.28s cubic-bezier(0.25,0.46,0.45,0.94)",
-      WebkitAnimation:"pageSlideIn 0.28s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
+      animation:`${dir==="left"?"pageSlideInLeft":"pageSlideIn"} var(--mrx-motion-surface) var(--mrx-motion-out)`}}>
       {children}
     </div>
   );
@@ -6552,7 +6405,7 @@ function AuthScreen({onAuth}){
           </button>
         </div>
         <div style={{textAlign:"center",marginTop:-10}}>
-          <span onMouseDown={e=>e.preventDefault()} onClick={()=>{if(showHelp){setHelpClosing(true);setTimeout(()=>{setShowHelp(false);setHelpClosing(false);},440);}else{setShowHelp(true);}}} style={{color:text2,fontSize:12,cursor:"pointer",textDecoration:"underline",display:"inline-flex",alignItems:"center",gap:4,transition:"color 0.2s"}}><IcHelpQ size={13}/> Как войти? <span style={{display:"inline-block",transition:"transform 0.3s cubic-bezier(0.34,1.56,0.64,1)",transform:(showHelp&&!helpClosing)?"rotate(180deg)":"rotate(0deg)",fontSize:10}}>▾</span></span>
+          <span onMouseDown={e=>e.preventDefault()} onClick={()=>{if(showHelp){setHelpClosing(true);setTimeout(()=>{setShowHelp(false);setHelpClosing(false);},440);}else{setShowHelp(true);}}} style={{color:text2,fontSize:12,cursor:"pointer",textDecoration:"underline",display:"inline-flex",alignItems:"center",gap:4,transition:"color 0.2s"}}><IcHelpQ size={13}/> Как войти? <span style={{display:"inline-block",transition:"transform var(--mrx-motion-surface) var(--mrx-motion-out)",transform:(showHelp&&!helpClosing)?"rotate(180deg)":"rotate(0deg)",fontSize:10}}>▾</span></span>
           {showHelp&&<div style={{textAlign:"left",background:surface2,border:`1px solid ${border}`,borderRadius:12,padding:"11px 13px",color:text2,fontSize:12.5,lineHeight:1.6,marginTop:8,overflow:"hidden",animation:helpClosing?"authHelpClose 0.45s cubic-bezier(0.65,0,0.35,1) both":"authHelpOpen 0.55s cubic-bezier(0.32,0.72,0,1) both",transformOrigin:"top center"}}>
             <b style={{color:text}}>Впервые здесь?</b><br/>1. Нажми «Регистрация» вверху<br/>2. Придумай имя, @юзернейм и пароль, укажи свою почту<br/>3. Введи код из письма — и готово!<br/><br/>
             <b style={{color:text}}>Уже есть аккаунт?</b><br/>Вводи свой @юзернейм (он написан в твоём профиле) или почту — и пароль.<br/><br/>
@@ -6681,7 +6534,7 @@ function EditProfile({currentUser,profile,onSave,onClose}){
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 // ─── Message ─────────────────────────────────────────────────────────────────
-function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,idx,audioMsgs,chatId,onBotCmd}){
+function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLongPress,onLongPressEnd,onOpenLightbox,onCircleFs,msgFontSize=14,audioMsgs,chatId,onBotCmd,onStickerPack}){
   const {accent,accent2,surface2,text,text2,bg}=useContext(ThemeCtx);
   const fromMe=msg.uid===myUid;
   const showAvatar=!fromMe&&msg.uid!==prevMsg?.uid;
@@ -6763,7 +6616,7 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
           onLongPress&&onLongPress(msg);
           setTimeout(()=>{
             if(msgRef.current){
-              msgRef.current.style.transition='transform 0.32s cubic-bezier(0.25,0.46,0.45,0.94),filter 0.32s ease';
+              msgRef.current.style.transition='transform 0.32s var(--mrx-motion-out),filter 0.32s ease';
               msgRef.current.style.transform='scale(1) translateY(0)';
               msgRef.current.style.filter='none';
               msgRef.current.style.zIndex='';
@@ -6806,7 +6659,11 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
     if(isSticker)return(
       <div style={{fontSize:52,lineHeight:1,userSelect:"none",filter:"drop-shadow(0 2px 8px rgba(0,0,0,0.3))"}}
         onTouchStart={onPStart} onTouchMove={onPMove} onTouchEnd={onPEnd} onMouseDown={onPStart} onMouseUp={onPEnd}>
-        {msg.text}
+        {msg.fileUrl?<button className="mrx-chat-sticker" aria-label="Посмотреть набор стикеров"
+          onClick={event=>{
+            event.stopPropagation();
+            if(msg.stickerPackId)onStickerPack?.({kind:"preview",id:msg.stickerPackId});
+          }}><img src={mediaUrl(msg.fileUrl)} alt="Стикер" loading="lazy" draggable={false}/></button>:msg.text}
       </div>
     );
     // Системные сообщения (вступление/выход) — капсула по центру, как в TG.
@@ -6851,7 +6708,10 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
           :msg.type==="audio"?<AudioBubble msg={msg} fromMe={fromMe} audioMsgs={audioMsgs} chatId={chatId}/>
           :msg.type==="image"||msg.type==="file"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox} chatId={chatId}/>
           :msg.type==="video"?<FileBubble msg={msg} fromMe={fromMe} onOpenLightbox={onOpenLightbox} chatId={chatId}/>
-          :msg.text}
+          :typeof msg.text==="string"&&stickerLinkId(msg.text)?<button className="mrx-sticker-link" onClick={event=>{
+            event.stopPropagation();
+            onStickerPack?.({kind:"preview",id:stickerLinkId(msg.text)});
+          }}>Открыть набор стикеров</button>:renderSharedLinks(msg.text)}
       </div>
     );
   };
@@ -6859,7 +6719,10 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
   return(
     <div data-rmg-msg-id={msg.id||""} style={{display:"flex",flexDirection:fromMe?"row-reverse":"row",alignItems:"flex-end",gap:6,
       marginBottom:2,paddingLeft:fromMe?40:0,paddingRight:fromMe?0:40,
-      animation:(getS("bubbleAnim")===false||seenBefore)?undefined:`${fromMe?"msgInMe":"msgInThem"} 0.95s cubic-bezier(0.22,1,0.36,1) ${Math.min(idx*0.016,0.1)}s both`,
+      animation:(getS("bubbleAnim")===false||seenBefore)?undefined:fromMe
+        ?"msgInMe var(--mrx-motion-send) cubic-bezier(.22,1,.36,1) both"
+        :"msgIn var(--mrx-motion-message) var(--mrx-motion-message-ease) both",
+      transformOrigin:fromMe?"right bottom":"left bottom",
       position:"relative"}}
       onTouchStart={onTStart}
       onTouchMove={onTMove}
@@ -6872,7 +6735,7 @@ function Msg({msg,myUid,prevMsg,usersCache,chatPhotos,onAvatarClick,onReply,onLo
         {!fromMe&&<div style={{opacity:showAvatar?1:0}}><Avatar name={msg.author} size={28} photo={photo} onClick={()=>onAvatarClick?.(msg.uid)}/></div>}
       </div>
       <div ref={msgRef} style={{display:"flex",flexDirection:"column",alignItems:fromMe?"flex-end":"flex-start",maxWidth:"78%",position:"relative",
-        transform:`translateX(${swipeX}px)`,transition:swiping?"none":"transform 0.25s cubic-bezier(0.34,1.56,0.64,1)"}}>
+        transform:`translateX(${swipeX}px)`,transition:swiping?"none":"transform var(--mrx-motion-control) var(--mrx-motion-out)"}}>
         {!fromMe&&msg.uid!==prevMsg?.uid&&!isSticker&&!isCircle&&(
           <div style={{fontSize:11,color:colorFor(msg.author||"?"),marginBottom:2,paddingLeft:3,fontWeight:600,display:"flex",alignItems:"center",gap:5}}>
             {msg.author}
@@ -7712,11 +7575,11 @@ function MiniPlayer(){
       {/* Tappable area */}
       <div
         onClick={openFullPlayer}
+        data-mrx-mini-player
         style={{
           display:"flex",alignItems:"center",gap:10,
           padding:"8px 12px 6px",
           background:surface+"F0",
-          backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",
           borderBottom:`1px solid ${border}`,
           cursor:"pointer",position:"relative",
           pointerEvents:collapsed?"none":"auto",
@@ -7758,9 +7621,8 @@ function MiniPlayer(){
               color:"#fff",
               display:"flex",alignItems:"center",justifyContent:"center",
               boxShadow:`0 2px 8px ${accent}55`,
-              "--rmg-accent-a":`${accent}55`,"--rmg-accent-b":`${accent}44`,
-              animation:playing?"rmgPlayPulse 1.8s ease-out infinite":"none"}}>
-            {playing?<IcAudioPause size={18}/>:<IcAudioPlay size={18}/>}
+            }}>
+            <span key={String(playing)} className="mrx-play-icon">{playing?<IcAudioPause size={18}/>:<IcAudioPlay size={18}/>}</span>
           </button>
           {(hasPrev||hasNext)&&(
             <button className="rmg-audio-btn" onClick={e=>{e.stopPropagation();next();}}
@@ -7777,9 +7639,9 @@ function MiniPlayer(){
       {/* Progress line */}
       <div style={{height:2,background:border,position:"relative"}}>
         <div style={{position:"absolute",left:0,top:0,bottom:0,
-          width:(progress*100)+"%",
+          right:0,transform:`scaleX(${progress})`,transformOrigin:"left",
           background:`linear-gradient(90deg,${accent},${accent2})`,
-          transition:"width 0.3s linear"}}/>
+          transition:"transform 0.12s linear"}}/>
       </div>
     </div>
   );
@@ -7858,7 +7720,7 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
               opacity:isDragging?0.4:1,
               borderTop:isOver?`2px solid ${accent}`:"2px solid transparent",
               transition:"opacity 0.15s,border-color 0.1s,background 0.15s",
-              animation:`rmgRowIn 0.3s cubic-bezier(.22,1,.36,1) both`,
+              animation:`rmgRowIn var(--mrx-motion-surface) var(--mrx-motion-out) both`,
               animationDelay:`${Math.min(i,8)*0.03}s`,
             }}>
             {/* Drag handle — касание только здесь начинает drag */}
@@ -7908,7 +7770,7 @@ function QueueList({queue,idx,playing,accent,accent2,surface2,text,text2,border,
 // фазы — каждый трек выглядит по-своему. Глоу — двойной обводкой (широкая
 // полупрозрачная + тонкая яркая), т.к. shadowBlur на WebView слишком дорог
 // для 45 fps.
-function AudioWave({playing,seed}){
+function AudioWave({playing,seed,active}){
   const canvasRef=useRef(null);
   const stRef=useRef({amp:0.16,last:0,t:0});
   // Цвет волны — ВСЕГДА красный (фирменный MrX), независимо от темы.
@@ -7917,27 +7779,28 @@ function AudioWave({playing,seed}){
   useEffect(()=>{
     const canvas=canvasRef.current;if(!canvas)return;
     const c=canvas.getContext("2d");
+    if(!c)return;
     let raf=null;
-    const FRAME=1000/45; // ровно 45 fps
+    const FRAME=1000/30;
+    let sh=0;const s=seed||"";for(let i=0;i<s.length;i++)sh=(sh*31+s.charCodeAt(i))%10007;
+    let w=0,h=0,dpr=1;
+    const resize=()=>{
+      w=canvas.clientWidth;h=canvas.clientHeight;
+      dpr=Math.min(1.5,window.devicePixelRatio||1);
+      canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);
+    };
     const draw=(now)=>{
-      raf=requestAnimationFrame(draw);
+      if(active&&!document.hidden)raf=requestAnimationFrame(draw);
       const st=stRef.current;
-      if(now-st.last<FRAME)return;
+      if(raf!==null&&now-st.last<FRAME)return;
       const dt=Math.min(0.05,(now-st.last)/1000);
       st.last=now;
       const target=playing?1:0.16;
       st.amp+=(target-st.amp)*Math.min(1,dt*3.5);
       st.t+=dt*(playing?1:0.25);
-      const w=canvas.clientWidth,h=canvas.clientHeight;
       if(!w||!h)return;
-      const dpr=Math.min(2,window.devicePixelRatio||1);
-      if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){
-        canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);
-      }
       c.setTransform(dpr,0,0,dpr,0,0);
       c.clearRect(0,0,w,h);
-      // seed → стабильный сдвиг фаз на трек
-      let sh=0;const s=seed||"";for(let i=0;i<s.length;i++)sh=(sh*31+s.charCodeAt(i))%10007;
       const cy=h/2,t=st.t;
       c.globalCompositeOperation="lighter"; // RGB-глоу на тёмном фоне
       const LAYERS=5;
@@ -7949,7 +7812,7 @@ function AudioWave({playing,seed}){
         const f1=1.5+((L*7+sh)%5)*0.4, f2=4+((L*3+sh)%7)*0.55;
         const p1=t*(1.0+L*0.33)+sh*0.013+L, p2=t*(2.1+L*0.47)+L*3;
         const pts=[];
-        for(let x=0;x<=w;x+=3){
+        for(let x=0;x<=w;x+=5){
           const u=x/w,env=Math.sin(Math.PI*u)**2; // огибающая: затухание к краям
           const y=cy
             +Math.sin(u*f1*Math.PI*2+p1)*amp*0.62*env
@@ -7975,16 +7838,24 @@ function AudioWave({playing,seed}){
       }
       c.globalCompositeOperation="source-over";
     };
-    raf=requestAnimationFrame(draw);
-    return ()=>{cancelAnimationFrame(raf);c.setTransform(1,0,0,1,0,0);};
-  },[playing,seed]);
+    const refresh=()=>{
+      cancelAnimationFrame(raf);raf=null;
+      if(!document.hidden)draw(performance.now());
+    };
+    const observer=new ResizeObserver(()=>{resize();refresh();});
+    observer.observe(canvas);
+    document.addEventListener("visibilitychange",refresh);
+    resize();refresh();
+    return ()=>{cancelAnimationFrame(raf);observer.disconnect();
+      document.removeEventListener("visibilitychange",refresh);};
+  },[playing,seed,active]);
   return <canvas ref={canvasRef} style={{width:"100%",height:"100%",display:"block"}}/>;
 }
 
 function AudioPlayerScreen({currentUser}){
   const {surface,surface2,border,text,text2,accent,accent2,bg}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
-  const [visible,setVisible]=useState(false);
+  const {sheetRef,windowRef,surfaceRef,contentRef,previewRef,close,dragHandlers,settled}=usePlayerSheet(audio.playerAnchor,audio.closeFullPlayer);
   const [dragging,setDragging]=useState(false);
   const [activeTab,setActiveTab]=useState("player"); // "player" | "queue"
   const [showSpeedPopup,setShowSpeedPopup]=useState(false);
@@ -7993,8 +7864,6 @@ function AudioPlayerScreen({currentUser}){
   const [pinnedId,setPinnedId]=useState(null);
   const [pinBusy,setPinBusy]=useState(false);
   const seekBarRef=useRef(null);
-
-  useEffect(()=>{requestAnimationFrame(()=>setVisible(true));},[]);
 
   const trackId=audio?.track?.id;
   useEffect(()=>{setLiked(false);setShowSpeedPopup(false);},[trackId]);
@@ -8016,7 +7885,13 @@ function AudioPlayerScreen({currentUser}){
       if(pinnedId===t.id){
         await setDoc(doc(db,"users",currentUser.uid),{pinnedTrack:null},{merge:true});
       }else{
-        await setDoc(doc(db,"users",currentUser.uid),{pinnedTrack:{id:t.id,name:t.name||"",author:t.author||"",coverUrl:t.coverUrl||"",src:t.src||"",ext:t.ext||""}},{merge:true});
+        let src=t.src||"";
+        if(src.startsWith("data:")){
+          const blob=await (await fetch(src)).blob();
+          const file=new File([blob],"pinned-track."+(t.ext||"mp3"),{type:blob.type});
+          src=await uploadFileToFirebase(file,"profile-audio");
+        }
+        await setDoc(doc(db,"users",currentUser.uid),{pinnedTrack:{id:t.id,name:t.name||"",author:t.author||"",coverUrl:t.coverUrl||"",src,ext:t.ext||""}},{merge:true});
       }
     }catch(e){}
     setPinBusy(false);
@@ -8074,13 +7949,12 @@ function AudioPlayerScreen({currentUser}){
     if(!audio?.showFullPlayer||!audio?.track)return;
     const closeByBack=()=>{
       if(showSpeedPopup){setShowSpeedPopup(false);return true;}
-      setVisible(false);
-      setTimeout(()=>audio.closeFullPlayer(),300);
+      close();
       return true;
     };
     _audioBackHandler=closeByBack;
     return()=>{if(_audioBackHandler===closeByBack)_audioBackHandler=null;};
-  },[audio?.showFullPlayer,audio?.track?.id,audio?.closeFullPlayer,showSpeedPopup]);
+  },[close,showSpeedPopup]);
 
   if(!audio||!audio.track)return null;
   const {track,playing,progress,currentTime,duration,queue,idx,shuffle,repeat,speed}=audio;
@@ -8109,24 +7983,30 @@ function AudioPlayerScreen({currentUser}){
   const nextRepeat=()=>audio.setRepeat(repeat==="off"?"all":repeat==="all"?"one":"off");
   const repeatActive=repeat!=="off";
 
-  const close=()=>{setVisible(false);setTimeout(()=>audio.closeFullPlayer(),300);};
-
   return(
-    <div style={{
-      position:"fixed",inset:0,zIndex:500,
-      background:bg,
-      transform:visible?"translateY(0)":"translateY(100%)",
-      transition:"transform 0.32s cubic-bezier(0.32,0.72,0,1)",
-      display:"flex",flexDirection:"column",
-      overflow:"hidden",
-    }}>
+    <div ref={sheetRef} className="mrx-player-sheet" aria-label="Плеер">
+      <div ref={windowRef} className="mrx-player-window">
+      <div ref={surfaceRef} className="mrx-player-surface" style={{background:bg}}>
+      <div ref={previewRef} className="mrx-player-preview" aria-hidden="true" style={{color:text,background:surface}}>
+        <div style={{width:34,height:34,borderRadius:9,overflow:"hidden",flexShrink:0,display:"grid",
+          placeItems:"center",background:accent,color:"#fff"}}>
+          {track.coverUrl?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+            :<IcMusicNote size={16}/>}
+        </div>
+        <div style={{flex:1,minWidth:0,fontSize:12,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          {track.name||"Аудио"}
+        </div>
+        {playing?<IcAudioPause size={18}/>:<IcAudioPlay size={18}/>}
+      </div>
+      <div ref={contentRef} className="mrx-player-content">
       {/* Header */}
-      <div style={{
+      <div {...dragHandlers} style={{
         display:"flex",alignItems:"center",justifyContent:"space-between",
         paddingTop:"max(env(safe-area-inset-top,28px),28px)",
         paddingLeft:16,paddingRight:16,paddingBottom:14,
-        flexShrink:0,position:"relative",zIndex:1,
+        flexShrink:0,position:"relative",zIndex:1,touchAction:"none",color:text2,
       }}>
+        <span className="mrx-player-grip" aria-hidden="true"/>
         <button className="rmg-audio-btn" onClick={close} style={{width:40,height:40,borderRadius:"50%",border:"none",cursor:"pointer",
           background:surface2,color:text,display:"flex",alignItems:"center",justifyContent:"center"}}>
           <IcChevronDown size={22}/>
@@ -8157,7 +8037,7 @@ function AudioPlayerScreen({currentUser}){
       {/* Scrollable content */}
       <div style={{flex:1,overflowY:"auto",paddingBottom:"max(env(safe-area-inset-bottom,20px),20px)",position:"relative",zIndex:1}}>
         {activeTab==="queue"?(
-          <div style={{padding:"12px 24px 0",animation:"rmgQueueOpen 0.32s cubic-bezier(.22,1,.36,1) both"}}>
+          <div style={{padding:"12px 24px 0",animation:"rmgQueueOpen var(--mrx-motion-surface) var(--mrx-motion-out) both"}}>
             <QueueList queue={queue} idx={idx} playing={playing} accent={accent} accent2={accent2} surface2={surface2} text={text} text2={text2} border={border} audio={audio}/>
           </div>
         ):(<>
@@ -8173,7 +8053,7 @@ function AudioPlayerScreen({currentUser}){
           }}>
             {track.coverUrl
               ?<img src={track.coverUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}/>
-              :<AudioWave playing={!!playing} seed={track.id||track.name||"x"}/>}
+              :<AudioWave playing={!!playing} active={settled} seed={track.id||track.name||"x"}/>}
           </div>
         </div>
 
@@ -8217,9 +8097,9 @@ function AudioPlayerScreen({currentUser}){
               borderRadius:2,transition:"width 0.5s linear"}}/>
             {/* Playback progress bar */}
             <div style={{position:"absolute",left:0,top:0,height:"100%",
-              width:(progress*100)+"%",
-              background:text,
-              borderRadius:2}}/>
+              width:"100%",transformOrigin:"left",transform:`scaleX(${progress})`,
+              transition:playing&&!dragging?"transform 100ms linear":"none",
+              background:text,borderRadius:2}}/>
             {/* Thumb */}
             <div style={{position:"absolute",top:"50%",left:(progress*100)+"%",
               transform:"translate(-50%,-50%)",
@@ -8249,10 +8129,8 @@ function AudioPlayerScreen({currentUser}){
             style={{width:64,height:64,borderRadius:"50%",border:"none",cursor:"pointer",
               background:text,color:bg,
               display:"flex",alignItems:"center",justifyContent:"center",
-              boxShadow:"0 6px 20px rgba(0,0,0,0.35)",
-              "--rmg-accent-a":"rgba(0,0,0,0.35)","--rmg-accent-b":"rgba(0,0,0,0.35)",
-              animation:playing?"rmgPlayPulse 1.8s ease-out infinite":"none"}}>
-            {playing?<IcAudioPause size={26}/>:<IcAudioPlay size={26}/>}
+              boxShadow:"0 6px 20px rgba(0,0,0,0.35)"}}>
+            <span key={String(playing)} className="mrx-play-icon">{playing?<IcAudioPause size={26}/>:<IcAudioPlay size={26}/>}</span>
           </button>
           <button className="rmg-audio-btn" onClick={()=>audio.next()}
             style={{width:48,height:48,borderRadius:"50%",border:"none",cursor:"pointer",
@@ -8296,7 +8174,7 @@ function AudioPlayerScreen({currentUser}){
           background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"flex-end"}}>
           <div onClick={e=>e.stopPropagation()} style={{width:"100%",background:surface,
             borderRadius:"20px 20px 0 0",padding:"20px 20px max(env(safe-area-inset-bottom,20px),20px)",
-            animation:"rmgQueueOpen 0.28s cubic-bezier(.22,1,.36,1) both"}}>
+            animation:"sheetUpQ var(--mrx-motion-surface) var(--mrx-motion-out) both"}}>
             <div style={{color:text,fontWeight:700,fontSize:15,marginBottom:14}}>Скорость воспроизведения</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               {SPEEDS.map(s=>(
@@ -8312,19 +8190,24 @@ function AudioPlayerScreen({currentUser}){
           </div>
         </div>
       )}
+      </div>
+      </div>
+      </div>
     </div>
   );
 }
 
 // ─── Chat Screen ──────────────────────────────────────────────────────────────
-function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile,showToast,wallpaperId,msgFontSize=14,chats=[]}){
+function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile,showToast,wallpaperId,msgFontSize=14,chats=[],stickerPacks,onStickerLibraryUse,onStickerPack}){
   const {bg,surface,surface2,border,text,text2,accent,accent2}=useContext(ThemeCtx);
   const audio=useContext(AudioCtx);
-  const[msgs,setMsgs]=useState([]);
+  const[msgs,setMsgs]=useState(()=>{
+    const history=_chatMsgsMemo.get(chat.id)||[];
+    markHistorySeen(history);
+    return history;
+  });
   const audioMsgs=useMemo(()=>msgs.filter(m=>m.type==="audio"&&!m.deletedForAll&&!isMsgDeletedFor(m,currentUser.uid)),[msgs,currentUser.uid]);
-  // Смена чата → чистим «показанные»: история нового чата анимируется при открытии
-  useEffect(()=>{clearSeenMsgs();},[chat?.id]);
-  const[msgsReady,setMsgsReady]=useState(false); // true после первой загрузки — убирает "Напишите первым!" во время загрузки
+  const[msgsReady,setMsgsReady]=useState(()=>msgs.length>0); // true после первой загрузки — убирает "Напишите первым!" во время загрузки
   const[loadingOlder,setLoadingOlder]=useState(false);
   const[hasOlder,setHasOlder]=useState(true);
   const oldestDocRef=useRef(null);
@@ -8354,7 +8237,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   },[showAttach]);
   // Запоминаем, была ли открыта клавиатура в момент открытия панели эмодзи.
   // Используется, чтобы при закрытии эмодзи вернуть клавиатуру (как в WhatsApp/Telegram).
-  const[kbWasOpen,setKbWasOpen]=useState(false);
+  const kbWasOpen=useRef(false);
   const[chatData,setChatData]=useState(chat);
   const[typingUsers,setTypingUsers]=useState([]);
   const typingSeenRef=useRef({}); // uid -> {ts, until}: реагируем на ИЗМЕНЕНИЕ метки, а не на разницу часов устройств
@@ -8657,7 +8540,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   // Первый onSnapshot должен всегда прокрутить вниз
   const firestoreFirstLoad=useRef(true);
   // Явный сигнал «прокрутить вниз мгновенно» — надёжнее чем prevMsgCount===0
-  const shouldScrollBottomRef=useRef(false);
+  const shouldScrollBottomRef=useRef(msgs.length>0);
   // Firestore уже ответил → не даём кэшу перезаписать свежие данные
   const firestoreLoadedRef=useRef(false);
   // Синхронная блокировка двойной загрузки старых сообщений (ref, не state)
@@ -8681,7 +8564,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     // Устанавливается при первом открытии чата, загрузке кэша и первом onSnapshot
     if(shouldScrollBottomRef.current){
       el.style.scrollBehavior='auto';
-      el.scrollTop=el.scrollHeight+99999;
+      if(_emojiReserve)applyComposerInset(true);
+      else el.scrollTop=el.scrollHeight;
       shouldScrollBottomRef.current=false;
       isNearBottomRef.current=true;
       prevMsgCount.current=msgs.length;
@@ -8690,14 +8574,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
     if(msgs.length===0)return;
 
-    // Приоритет 3: новое сообщение в реальном времени → ПЛАВНЫЙ скролл у дна
-    // (раньше был мгновенный прыжок — список «резко уходил вверх», и боковой
-    // выезд бабла на этом фоне выглядел дёрганым). Анимация прокрутки
-    // синхронна по времени с выездом бабла (~0.5s).
+    // Исходящее сообщение занимает конечную позицию до анимации пузыря.
     if(msgs.length>prevMsgCount.current&&isNearBottomRef.current){
-      el.style.scrollBehavior='smooth';
-      el.scrollTop=el.scrollHeight+99999;
-      setTimeout(()=>{if(el)el.style.scrollBehavior='auto';},600);
+      if(_emojiReserve)applyComposerInset(true);
+      else{
+        const smooth=msgs.at(-1)?.uid!==currentUser.uid&&!window.__rmgImeMoving&&
+          !matchMedia("(prefers-reduced-motion: reduce)").matches;
+        el.scrollTo({top:el.scrollHeight,behavior:smooth?"smooth":"instant"});
+      }
     }
     prevMsgCount.current=msgs.length;
   }); // без deps — срабатывает на каждый рендер ДО отрисовки браузером (нет flash)
@@ -8716,6 +8600,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     // показывается сразу, БЕЗ спиннера загрузки (SQLite/сеть лишь уточнят её).
     const memo=_chatMsgsMemo.get(chat.id);
     if(memo&&memo.length){
+      markHistorySeen(memo);
       setMsgs(memo);
       setMsgsReady(true);
       shouldScrollBottomRef.current=true; // доскролл-интервал ниже подхватит
@@ -8735,7 +8620,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       if(!el)return false;
       // Пользователь уже скроллит сам (илиIME-анимация двигает список) —
       // не мешаем: наш доскролл только мешал и создавал «дёргание».
-      if(window.__rmgImeMoving)return true;
+      if(window.__rmgImeMoving||_emojiReserve)return true;
       const dist=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(dist>140)return false; // пользователь уехал вверх — не тянем назад
       el.style.scrollBehavior='auto';
@@ -8780,12 +8665,14 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         });
         if(merged.length>0){
           shouldScrollBottomRef.current=true;
+          markHistorySeen(merged);
           setMsgs(merged);
         }
         setMsgsReady(true); // оффлайн — других источников не будет
       } else {
         if(cached.length>0&&!firestoreLoadedRef.current){
           shouldScrollBottomRef.current=true; // прокрутим вниз без анимации
+          markHistorySeen(cached);
           setMsgs(cached);
           setMsgsReady(true);
         }
@@ -8856,6 +8743,8 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           // Заглушки с nonce, уже пришедшими в list (гонка отправки), не дублируем.
           const listNonces=new Set(list.filter(m=>m.nonce).map(m=>m.nonce));
           const liveLocals=locals.filter(l=>!(l.nonce&&listNonces.has(l.nonce)));
+          markHistorySeen(list);
+          if(list.length)_chatMsgsMemo.set(chat.id,list.slice(-80));
           setMsgs(liveLocals.length?[...list,...liveLocals]:list);
         }else{
           // Последующие срабатывания слушателя «последних 20» — СЛИВАЕМ с уже
@@ -8956,6 +8845,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           prevTop:el.scrollTop,
         };
       }
+      markHistorySeen(older);
       setMsgs(prev=>[...older,...prev]);
       older.forEach(m=>saveMsg({...m,chatId:chat.id}));
     }catch(e){
@@ -8969,7 +8859,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
   const sendMsg=async(extra)=>{
     const now = new Date();
-    const tempId = "tmp_"+Date.now();
+    const tempId = "tmp_"+crypto.randomUUID();
     const payload={author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,time:timeNow(),createdAt:serverTimestamp(),...extra};
     const replyBase=payload._replyTo||replyTo;
     delete payload._replyTo;
@@ -9097,6 +8987,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         uid:currentUser.uid,
         type:msg.type||"text",
         text:msg.text||"",
+        ...(msg.stickerPackId?{stickerPackId:msg.stickerPackId}:{}),
         fileUrl:msg.fileUrl||"",fileData:msg.fileData||"",fileName:msg.fileName||"",fileType:msg.fileType||"",fileSize:msg.fileSize||0,
         audioUrl:msg.audioUrl||"",audioData:msg.audioData||"",videoUrl:msg.videoUrl||"",videoData:msg.videoData||"",videoThumb:msg.videoThumb||"",
         waveform:msg.waveform||[],duration:msg.duration||"",
@@ -9108,44 +8999,6 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
       await updateDoc(favRef,{lastMsg:"⭐ "+preview,lastTime:timeNow(),lastTimeMs:Date.now(),members:[currentUser.uid]});
       showToast?.({msg:"Сохранено в Избранное",type:"ok"});
     }catch(e){console.error("saveToFavorites",e);showToast?.({msg:"Не удалось сохранить",type:"err"});}
-  };
-
-  // Плавное «растворение» текста из поля ввода при отправке: летящий клон
-  // (flyMsg) убран — он конфликтовал с боковым выездом бабла. Теперь текст
-  // мягко уезжает вверх и тает, поле очищается уже под пустым инпутом.
-  const flyMsg=(txt)=>{
-    if(getS("bubbleAnim")===false)return;
-    const inputEl=inputRef.current;
-    if(!inputEl)return;
-    const inputRect=inputEl.getBoundingClientRect();
-    const fade=document.createElement("div");
-    fade.textContent=txt;
-    fade.style.cssText=`
-      position:fixed;
-      left:${inputRect.left+14}px;
-      top:${inputRect.top}px;
-      height:${inputRect.height}px;
-      line-height:${inputRect.height}px;
-      color:${text2};
-      font-size:15px;
-      font-family:inherit;
-      max-width:60vw;
-      overflow:hidden;
-      white-space:nowrap;
-      text-overflow:ellipsis;
-      z-index:9999;
-      pointer-events:none;
-      opacity:0.9;
-      transform:translateY(0);
-      transition:transform 0.42s cubic-bezier(0.22,1,0.36,1), opacity 0.42s ease;
-      will-change:transform,opacity;
-    `;
-    document.body.appendChild(fade);
-    requestAnimationFrame(()=>{
-      fade.style.transform="translateY(-14px)";
-      fade.style.opacity="0";
-      setTimeout(()=>fade.remove(),480);
-    });
   };
 
   // Само-лечение: если старое «Удалить чат» выкинуло участника из members — возвращаем его
@@ -9206,10 +9059,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
     if(!txt)return;
     haptic(12);
 
-    // Запускаем полёт ДО очистки инпута
-    flyMsg(txt);
-
-    if(inputRef.current){inputRef.current.value="";requestAnimationFrame(()=>{if(inputRef.current)inputRef.current.focus();});}
+    if(inputRef.current){
+      inputRef.current.value="";
+      if(!showEmoji)requestAnimationFrame(()=>inputRef.current?.focus());
+    }
     setInputText("");setHasText(false);
 
     // ── Режим редактирования ─────────────────────────────────────────────
@@ -9341,7 +9194,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   };
 
   const startVoice=async()=>{
-    setShowAttach(false);setShowEmoji(false);setKbWasOpen(false);
+    setShowAttach(false);closeEmojiPanel();
     try{
       const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:{ideal:1},sampleRate:{ideal:48000},sampleSize:{ideal:16}}});voiceStreamRef.current=stream;
       const voiceMime=MediaRecorder.isTypeSupported("audio/webm;codecs=opus")?"audio/webm;codecs=opus":"audio/webm";
@@ -9405,7 +9258,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   },[circleStream]);
 
   const startCircle=async(facing="user")=>{
-    setShowAttach(false);setShowEmoji(false);setKbWasOpen(false);
+    setShowAttach(false);closeEmojiPanel();
     try{inputRef.current?.blur();}catch(e2){} // кружок большой — клавиатуру прячем
     try{
       const stream=await navigator.mediaDevices.getUserMedia({
@@ -9483,27 +9336,19 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   // При открытии: запоминаем, открыта ли клавиатура, и закрываем её.
   // При закрытии: если клавиатура была открыта — возвращаем фокус инпуту.
   const openEmojiPanel=()=>{
-    const inp=inputRef.current;
-    const wasFocused=!!(inp&&typeof document!=="undefined"&&document.activeElement===inp);
-    setKbWasOpen(wasFocused);
-    if(wasFocused){
-      try{inp.blur();}catch{}
-    }
+    const input=inputRef.current;
+    const viewport=window.visualViewport;
+    kbWasOpen.current=!!(input===document.activeElement&&
+      ((window.__rmgImeH||0)>80||(viewport&&window.innerHeight-viewport.height>80)));
+    if(input===document.activeElement)input.blur();
     setShowAttach(false);
     setShowEmoji(true);
   };
-  const closeEmojiPanel=()=>{
-    const shouldRestoreKb=kbWasOpen;
+  const closeEmojiPanel=(restoreKeyboard=false)=>{
+    const restore=restoreKeyboard&&kbWasOpen.current;
+    kbWasOpen.current=false;
     setShowEmoji(false);
-    setKbWasOpen(false);
-    if(shouldRestoreKb){
-      // На iOS programmatic focus() работает надёжно только в рамках
-      // user-gesture (синхронно в обработчике клика). setTimeout ломает контекст,
-      // поэтому фокусируем синхронно.
-      try{inputRef.current?.focus({preventScroll:true});}catch{
-        try{inputRef.current?.focus();}catch{}
-      }
-    }
+    if(restore)inputRef.current?.focus({preventScroll:true});
   };
   // Закрытие при тапе мимо панели/инпута (вызывается из chat root и messages)
   const closeOverlaysOutside=()=>{
@@ -9538,13 +9383,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
 
   return(
     <div
-      style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:bg||"#0E0E0E",display:"flex",flexDirection:"column",zIndex:100,
-        animation:"pageSlideIn 0.28s cubic-bezier(0.25,0.46,0.45,0.94)"
-      }} onClick={closeOverlaysOutside}>        {/* Pinned Message */}
+      style={{position:"absolute",inset:0,background:bg||"#0E0E0E",display:"flex",flexDirection:"column"}}
+      onClick={closeOverlaysOutside}>        {/* Pinned Message */}
         {pinnedMsg&&<PinnedBar msg={pinnedMsg} canPin={canManage} onUnpin={()=>updateDoc(doc(db,"chats",chat.id),{pinnedMsg:null}).catch(()=>{})}/>}
         {/* Header */}
         <div style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:13,paddingRight:13,paddingBottom:9,background:surface||"#1C1C1E",borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:11,flexShrink:0,boxShadow:"0 1px 6px rgba(0,0,0,0.18)"}} onClick={e=>e.stopPropagation()}>
-          <button onClick={onBack} style={{background:"none",border:"none",color:accent,fontSize:22,cursor:"pointer"}}>←</button>
+          <button aria-label="Назад к чатам" onClick={onBack} style={{background:"none",border:"none",color:accent,fontSize:22,cursor:"pointer"}}>←</button>
           <Avatar name={headerName} size={38} photo={headerPhoto} onClick={openChatHeader}/>
           <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={openChatHeader}>
             <div style={{color:text,fontWeight:700,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{isChannel?"📢 ":isGroup?"🫂 ":""}{headerName}</div>
@@ -9585,9 +9429,10 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             <button onClick={e=>{e.stopPropagation();setShowChatMenu(m=>!m);}} style={{width:36,height:36,borderRadius:"50%",background:surface2,border:`1px solid ${border}`,color:text2,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⋮</button>
             {showChatMenu&&(<>
               <div style={{position:"fixed",inset:0,zIndex:199}} onClick={closeChatMenu}/>
-              <div style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",animation:chatMenuClosing?"menuFadeQ 0.22s ease forwards":"menuPopQ 0.26s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
+              <div style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",animation:chatMenuClosing?"menuFadeQ 0.22s ease forwards":"menuPopQ var(--mrx-motion-control) var(--mrx-motion-out)"}} onClick={e=>e.stopPropagation()}>
                 {[
                   {ico:isMuted?<IcSetBell size={18} color="#8e8e93" style={_mi}/>:<IcMute size={18} color="#8e8e93" style={_mi}/>,lbl:isMuted?"Включить звук":"Выключить звук",fn:()=>{const m=!isMuted;setIsMuted(m);setS("mute_"+chat.id,m);closeChatMenu();}},
+                  ...(!isGroup&&!isChannel?[{ico:<IcLink size={18} color="#8e8e93"/>,lbl:"Ссылка и QR-код",fn:()=>{closeChatMenu();setShowChatInfo(true);}}]:[]),
                   ...(canManage?[{ico:<IcTabSettings size={18} color="#8e8e93" style={_mi}/>,lbl:"Настройки",fn:()=>{closeChatMenu();setShowChatSettings(true);}}]:[]),
                   {ico:<IcTrash size={18} color="#ff5252" style={_mi}/>,lbl:"Удалить чат",red:true,fn:async()=>{
                     if(await appConfirm("Удалить чат у себя?","Удалить")){
@@ -9615,7 +9460,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             // Во время движения клавиатуры список крутится программно
             // (IME-механизм якорит низ) — пропускаем всю тяжёлую обработку,
             // она всё равно не нужна, пока пользователь не скроллит сам.
-            if(window.__rmgImeMoving)return;
+            if(window.__rmgImeMoving||_emojiReserve)return;
             const el=e.target;
             const dist=el.scrollHeight-el.scrollTop-el.clientHeight;
             // Строгий порог "у самого низа" ≈ 80px (≈ высота 1 сообщения).
@@ -9649,10 +9494,11 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
               <div style={{color:text2,fontSize:14}}>Напишите первым!</div>
             </div>
           ):null}
+          {msgsReady&&msgs.length>0&&<div aria-hidden="true" style={{marginTop:"auto"}}/>}
           {msgs.map((m,i)=>{
             if(isMsgDeletedFor(m,currentUser.uid)||m.deletedForAll)return null;
             if(m.botCmd)return null; // служебная команда боту — не показываем
-            return <Msg key={m.nonce||m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} idx={i} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onBotCmd={cmd=>{try{inputRef.current?.blur();}catch(e){}const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c,botCmd:true}).catch(()=>{});}}/>;
+            return <Msg key={m.nonce||m.id||i} msg={{...m,_partnerAllowsReceipts:partnerData?.readReceipts!==false&&getS("readReceipts")!==false}} myUid={currentUser.uid} prevMsg={i>0?msgs[i-1]:null} usersCache={usersCache} chatPhotos={chatData?.photos} onAvatarClick={uid=>uid&&onViewProfile(uid)} onReply={msg=>{setReplyTo(msg);inputRef.current?.focus();}} onOpenLightbox={src=>{try{inputRef.current?.blur();}catch(e){} setLightbox(src);}} onLongPress={()=>{lpActiveRef.current=true;setCtxMsg(m);}} onLongPressEnd={()=>{setTimeout(()=>lpActiveRef.current=false,500);}} onCircleFs={src=>setCircleFs(src)} msgFontSize={msgFontSize} audioMsgs={audioMsgs} chatId={chat.id} onStickerPack={onStickerPack} onBotCmd={cmd=>{try{inputRef.current?.blur();}catch(e){}const c=(typeof cmd==="string"?cmd:(cmd&&cmd.text)||"").trim();if(!c)return;sendMsg({text:c,botCmd:true}).catch(()=>{});}}/>;
           })}
           <div ref={bottomRef}/>
           <div ref={imeSpacerRef} style={{flexShrink:0}}/>
@@ -9705,6 +9551,24 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         )}
 
 
+        {canWrite&&<EmojiPanel open={showEmoji} dockRef={imeDockRef} packs={stickerPacks}
+          onLibraryUse={onStickerLibraryUse} onPack={onStickerPack}
+          onEmoji={emoji=>{
+            const input=inputRef.current;
+            if(!input)return;
+            const value=input.value||inputText||"";
+            const start=input.value?input.selectionStart??value.length:value.length;
+            const end=input.value?input.selectionEnd??start:start;
+            const next=value.slice(0,start)+emoji+value.slice(end);
+            input.value=next;
+            input.setSelectionRange(start+emoji.length,start+emoji.length);
+            setInputText(next);
+            setHasText(true);
+          }}
+          onSticker={(item,packId)=>{
+            sendMsg(packId?{type:"sticker",text:"Стикер",fileUrl:portableMediaUrl(item),stickerPackId:packId}:{type:"sticker",text:item});
+            playSound("sent");
+          }}/>}
         {/* Input */}
         {canWrite?(
           <div ref={imeDockRef} data-rmg-dock="" style={{position:"absolute",left:0,right:0,bottom:0,zIndex:120}}>
@@ -9721,7 +9585,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             </div>
           </div>
         )}
-          <div style={{padding:"7px 9px",paddingBottom:showEmoji?7:"max(7px,env(safe-area-inset-bottom,7px))",background:surface,borderTop:`1px solid ${border}`,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+          <div className="mrx-composer" style={{"--composer-bg":surface,"--composer-card":surface2,"--composer-line":border,"--composer-text":text,"--composer-muted":text2,"--composer-accent":accent,"--composer-on-accent":contrastOn(accent)}} onClick={e=>e.stopPropagation()}>
             {online&&editMsg&&(
               <div style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:surface2,borderLeft:`3px solid ${accent}`,marginBottom:4}}>
                 <div style={{flex:1,minWidth:0}}>
@@ -9743,15 +9607,19 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             )}
             {(
               <div style={recording?{position:"absolute",left:-10000,top:0,width:10,height:44,opacity:0,overflow:"hidden",pointerEvents:"none"}:{display:"flex",alignItems:"center",gap:7}}>
-                <button onClick={e=>{e.stopPropagation();
-                  // Если открываем attach — закрываем эмодзи с учётом kbWasOpen
+                <button aria-label="Вложения" aria-expanded={showAttach} className="mrx-compose-button" onClick={e=>{e.stopPropagation();
                   if(showEmoji)closeEmojiPanel();
                   setShowAttach(a=>!a);
-                }} style={{width:42,height:42,borderRadius:"50%",background:showAttach?accent+"33":surface2,border:`1.5px solid ${showAttach?accent:border}`,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s",color:showAttach?accent:text2}}><IcPaperclip size={19}/></button>
-                <button onClick={e=>{e.stopPropagation();
-                  if(showEmoji)closeEmojiPanel();
-                  else openEmojiPanel();
-                }} style={{width:42,height:42,borderRadius:"50%",background:showEmoji?accent+"33":surface2,border:`1.5px solid ${showEmoji?accent:border}`,cursor:"pointer",fontSize:19,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,transition:"all 0.2s"}}>😊</button>
+                }}><IcPaperclip size={20}/></button>
+                <button aria-label={showEmoji?"Закрыть смайлики":"Открыть смайлики"} aria-expanded={showEmoji}
+                  className="mrx-compose-button mrx-emoji-toggle" onMouseDown={e=>e.preventDefault()} onClick={e=>{
+                    e.stopPropagation();
+                    if(showEmoji)closeEmojiPanel(true);
+                    else openEmojiPanel();
+                  }}>
+                  <span data-icon="smile"><ComposerIcon name="smile" size={22}/></span>
+                  <span data-icon="keyboard"><ComposerIcon name="keyboard" size={22}/></span>
+                </button>
                 <input ref={inputRef}
                   defaultValue=""
                   onInput={e=>{
@@ -9783,18 +9651,17 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                     e.stopPropagation();
                     // Тап по инпуту — клавиатура откроется естественно через focus.
                     // Эмодзи закрываем без восстановления, т.к. фокус уже идёт на инпут.
-                    setShowEmoji(false);
+                    closeEmojiPanel();
                     setShowAttach(false);
-                    setKbWasOpen(false);
                   }}
-                  style={{flex:1,background:surface2,border:`1.5px solid ${border}`,borderRadius:22,padding:"11px 15px",color:text,fontSize:14,outline:"none",fontFamily:"inherit",minWidth:0,overflowX:"auto"}}
-                  onFocus={e=>e.target.style.borderColor=accent}
+                  className="mrx-compose-input"
+                  onFocus={()=>{if(showEmoji)closeEmojiPanel();}}
                   onBlur={e=>{
-                    e.target.style.borderColor=border;
                     const v=e.target.value;
                     setInputText(v);
                     setHasText(v.length>0);
                   }}/>
+                <div className="mrx-compose-action">
                 {!hasText&&!inputText.trim()&&(
                   <div style={{display:"flex",gap:6}}>
                     <div style={{position:"relative"}}>
@@ -9809,70 +9676,21 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                         onTouchStart={e=>{e.preventDefault();quickRecordStartedRef.current=false;setVoiceHolding(true);lpVoiceRef.current=setTimeout(()=>{quickRecordStartedRef.current=true;if(navigator.vibrate)navigator.vibrate(40);startQuickRecord();setVoiceHolding(false);},400);}}
                         onTouchEnd={()=>{clearTimeout(lpVoiceRef.current);setVoiceHolding(false);}}
                         onClick={e=>{e.stopPropagation();if(quickRecordStartedRef.current){quickRecordStartedRef.current=false;return;}setQuickMode(m=>m==="voice"?"circle":"voice");}}
-                        style={{width:42,height:42,borderRadius:"50%",
-                          background:voiceHolding?accent+"44":surface2,
-                          border:`1.5px solid ${voiceHolding?accent:border}`,
-                          cursor:"pointer",display:"flex",alignItems:"center",
-                          justifyContent:"center",flexShrink:0,color:text2,
-                          transition:"all 0.15s",WebkitTapHighlightColor:"transparent",
-                          transform:voiceHolding?"scale(1.12)":"scale(1)"}}>{quickMode==="voice"?<IcMic size={18}/>:<IcCircleOutline size={18}/>}</button>
+                        className="mrx-compose-button" aria-label={quickMode==="voice"?"Голосовое сообщение":"Видеосообщение"}
+                        data-holding={voiceHolding}>{quickMode==="voice"?<IcMic size={18}/>:<IcCircleOutline size={18}/>}</button>
                     </div>
                   </div>
                 )}
                 {inputText.trim()&&(
-                  <button onClick={uploading?undefined:handleSend} onMouseDown={e=>e.preventDefault()} onTouchEnd={e=>{e.preventDefault();if(!uploading)handleSend();}} disabled={!!uploading} style={{width:42,height:42,borderRadius:"50%",background:uploading?surface2:`linear-gradient(135deg,${accent},${accent2})`,border:"none",cursor:uploading?"not-allowed":"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,boxShadow:uploading?"none":`0 3px 12px ${accent}55`,animation:"popIn 0.18s cubic-bezier(0.34,1.56,0.64,1)",opacity:uploading?0.5:1}}
-                  onMouseDown={e=>e.preventDefault()}>➤</button>
+                  <button className="mrx-compose-button mrx-compose-send" aria-label="Отправить"
+                    onClick={handleSend} onMouseDown={e=>e.preventDefault()} disabled={!!uploading}>
+                    <ComposerIcon name="send" size={20}/>
+                  </button>
                 )}
+                </div>
               </div>
             )}
           </div>
-        {/* Emoji panel — РАСПОЛОЖЕНА ПОД ИНПУТОМ (как в WhatsApp/Telegram).
-            Всегда смонтирована, чтобы анимация закрытия проигрывалась корректно. */}
-        <div onClick={e=>e.stopPropagation()} onMouseDown={e=>{if(showEmoji)e.preventDefault();}} style={showAttach?{display:"none"}:{flexShrink:0}}>
-          <EmojiPanel
-            open={showEmoji}
-            onEmoji={emoji=>{
-              const inp=inputRef.current;
-              if(!inp){
-                // fallback: только state
-                setInputText(t=>t+emoji);
-                setHasText(true);
-                return;
-              }
-              // Если inputText был выставлен программно (edit-режим), а DOM-инпут пуст —
-              // синхронизируем перед вставкой, чтобы не потерять исходный текст.
-              if(!inp.value&&inputText){
-                inp.value=inputText;
-              }
-              const cur=inp.value||"";
-              // На мобильном при открытой панели эмодзи инпут НЕ сфокусирован
-              // (мы намеренно сняли фокус, чтобы закрыть клавиатуру). В этом случае
-              // вставляем эмодзи в конец строки и НЕ вызываем focus() — иначе
-              // откроется клавиатура и закроет панель эмодзи.
-              const isFocused=(typeof document!=="undefined")&&document.activeElement===inp;
-              let start,end;
-              if(isFocused){
-                start=(typeof inp.selectionStart==="number"?inp.selectionStart:cur.length);
-                end=(typeof inp.selectionEnd==="number"?inp.selectionEnd:cur.length);
-              } else {
-                start=end=cur.length;
-              }
-              const next=cur.slice(0,start)+emoji+cur.slice(end);
-              inp.value=next;
-              // Восстанавливаем позицию каретки только если инпут уже сфокусирован
-              // (десктоп). На мобильном фокус не вызываем.
-              if(isFocused){
-                try{
-                  const pos=start+emoji.length;
-                  inp.setSelectionRange(pos,pos);
-                }catch{}
-              }
-              setInputText(next);
-              setHasText(next.length>0);
-            }}
-            onSticker={e=>{sendMsg({type:"sticker",text:e});playSound("sent");closeEmojiPanel();}}
-            onClose={()=>closeEmojiPanel()}/>
-        </div>
           </div>
         ):(
           <div style={{padding:14,background:surface,borderTop:`1px solid ${border}`,textAlign:"center",color:text2,fontSize:13}}>📢 Только администратор может публиковать</div>
@@ -9895,7 +9713,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           </div>
         )}
         {showAddMembers&&<AddMembersModal chat={chatData} currentUser={currentUser} onClose={()=>setShowAddMembers(false)}/>}
-        {showChatInfo&&<ChatInfoModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatInfo(false)} onOpenSettings={()=>{setShowChatInfo(false);setShowChatSettings(true);}}/>}
+        {showChatInfo&&<ChatInfoModal chat={{...chatData,id:chat.id,name:headerName,photo:headerPhoto}} currentUser={currentUser} onClose={()=>setShowChatInfo(false)} onOpenSettings={()=>{setShowChatInfo(false);setShowChatSettings(true);}}/>}
         {showChatSettings&&<ChatSettingsModal chat={chatData} currentUser={currentUser} onClose={()=>setShowChatSettings(false)} onSaved={patch=>setChatData(c=>({...c,...patch}))}/>}
         {/* Поиск: прыжок К НАЙДЕННОМУ сообщению (раньше onJump был пустой
             заглушкой — «отправляло в конец» и без подсветки). Если сообщение
@@ -9965,6 +9783,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                     uid:currentUser.uid,
                     type:msg.type||"text",
                     text:fwdText,
+                    ...(msg.stickerPackId?{stickerPackId:msg.stickerPackId}:{}),
                     fileUrl:msg.fileUrl||"",
                     fileData:msg.fileData||"",
                     fileName:msg.fileName||"",
@@ -10119,12 +9938,14 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   // только тех чатов, у которых lastTime реально изменился. Так получается «фоновое»
   // авто-сохранение всех чатов, а не только открытого, без отдельных подписок.
   const lastTimesRef=useRef(null);
-  const chatsSeqRef=useRef(0);
 
   useEffect(()=>{
+    let active=true;
+    let snapshotNumber=0;
+    const photoRefreshAt=new Map();
     const q=query(collection(db,"chats"),where("members","array-contains",currentUser.uid));
-    return onSnapshot(q,async snap=>{
-      const _seq=++chatsSeqRef.current;
+    const unsubscribe=onSnapshot(q,snap=>{
+      const currentSnapshot=++snapshotNumber;
       const list=snap.docs.map(d=>({id:d.id,...d.data()}));
       setChatsError("");
 
@@ -10154,58 +9975,50 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         return tb>ta?1:-1;
       });
 
-      // Fetch ALL partner photos — только при наличии сети; иначе используем
-      // уже подгруженный `mrx_photos` из localStorage (инициализирован выше).
-      if(navigator.onLine){
-        const allPartnerUids=[...new Set(
-          list.filter(c=>c.type==="direct"&&c.names)
-            .flatMap(c=>Object.keys(c.names||{}).filter(uid=>uid!==currentUser.uid))
-        )];
-        if(allPartnerUids.length>0){
-          const fetched={};
-          await Promise.all(allPartnerUids.map(async uid=>{
-            try{
-              const s=await getDoc(doc(db,"users",uid));
-              if(s.exists()){fetched[uid]=s.data()?.photo||s.data()?.photoURL||null;}
-            }catch{}
-          }));
-          if(_seq!==chatsSeqRef.current)return;
-          setPhotosCache(prev=>{
-            const m={...prev};Object.entries(fetched).forEach(([u,v])=>{if(v)m[u]=v;});
-            try{localStorage.setItem("mrx_photos",JSON.stringify(m));}catch{}
-            return m;
-          });
-          // Also force chats re-render with photo data
-          setChats(prev=>prev.map(c=>{
-            if(c.type==="direct"&&c.names){
-              const partnerUid=Object.keys(c.names).find(u=>u!==currentUser.uid);
-              if(partnerUid&&fetched[partnerUid]!==undefined){
-                return {...c,_partnerPhoto:fetched[partnerUid]};
-              }
-            }
-            return c;
-          }));
-        }
-      }
-
-      // Скрытые чаты прячем только пока нет сообщений новее момента удаления
-      if(_seq!==chatsSeqRef.current)return;
-      const _hidden=readHidden("rmg_hidden_chats_"+(currentUser.uid));
-      const filtered=list.filter(c=>!isHiddenChat(_hidden,currentUser.uid,c));
+      // Показываем список сразу. Аватары собеседников догружаются в фоне.
+      const hidden=readHidden("rmg_hidden_chats_"+currentUser.uid);
+      const filtered=list.filter(c=>!isHiddenChat(hidden,currentUser.uid,c));
       setChats(filtered);onChatsLoad?.(filtered);
+      setChatsReady(true);
+
+      if(navigator.onLine){
+        const partnerUids=[...new Set(filtered.filter(c=>c.type==="direct")
+          .map(c=>Object.keys(c.names||{}).find(uid=>uid!==currentUser.uid)).filter(Boolean))];
+        const now=Date.now();
+        const stale=partnerUids.filter(uid=>(photoRefreshAt.get(uid)||0)<=now);
+        stale.forEach(uid=>photoRefreshAt.set(uid,now+300_000));
+        void (async()=>{
+          for(let i=0;active&&i<stale.length;i+=4){
+            const fetched={};
+            await Promise.all(stale.slice(i,i+4).map(async uid=>{
+              try{
+                const profile=(await getDoc(doc(db,"users",uid))).data();
+                fetched[uid]=profile?.photo||profile?.photoURL||null;
+              }catch{
+                photoRefreshAt.set(uid,Date.now()+30_000);
+              }
+            }));
+            if(!active||!Object.keys(fetched).length)continue;
+            setPhotosCache(prev=>{
+              const next={...prev,...fetched};
+              try{localStorage.setItem("mrx_photos",JSON.stringify(next));}catch{}
+              return next;
+            });
+          }
+        })();
+      }
       // ── Telegram-style префетч: очередь фоновых догрузок лент всех чатов.
       // Последовательно, с паузой 400мс — слабый сервер (512 МБ) не душим.
       // Через _chatMsgsMemo+SQLite любой чат открывается мгновенно.
       if(navigator.onLine){
         (async()=>{
           for(const c of filtered){
-            if(!navigator.onLine)break;
+            if(!active||snapshotNumber!==currentSnapshot||!navigator.onLine)break;
             await prefetchChat(c.id);
             await new Promise(r=>setTimeout(r,400));
           }
         })();
       }
-      setChatsReady(true);
       // Кэш для оффлайн-запуска. Сохраняем ВСЕ чаты (метаданные мизерные),
       // и только если выборка не пустая — пустой массив никогда не пишем.
       if(list.length>0){
@@ -10286,6 +10099,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         setChatsError("Не удалось загрузить чаты с сервера. Повтори попытку.");
       }
     });
+    return ()=>{active=false;unsubscribe();};
   },[currentUser.uid,chatsReloadKey]);
 
   // ── Оффлайн-гидрация списка чатов из IndexedDB ──────────────────────────────
@@ -10432,7 +10246,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   return(
     <div style={{display:"flex",flexDirection:"column",height:"100vh",width:"100%",background:bg||"#0A0A0A",position:"relative"}}>
       {/* ── Top Header ── */}
-      <div style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:14,paddingRight:14,paddingBottom:9,background:surface+"EE",borderBottom:`1px solid ${border}`,backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",flexShrink:0}}>
+      <div className="mrx-glass-header" style={{paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:14,paddingRight:14,paddingBottom:9,background:surface+"EE",borderBottom:`1px solid ${border}`,backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",flexShrink:0}}>
         <div style={{position:"relative",display:"flex",alignItems:"center",justifyContent:"flex-end",marginBottom:9,minHeight:36}}>
           {/* Center: tab title — absolutely positioned, doesn't intercept clicks */}
           <div style={{position:"absolute",left:"50%",top:"50%",transform:"translate(-50%,-50%)",color:text,fontWeight:800,fontSize:20,display:"flex",alignItems:"center",gap:8,pointerEvents:"none",whiteSpace:"nowrap"}}>
@@ -10461,7 +10275,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
           открывает её экран. Кнопка ← в шапке и физический Back делают одно и то же:
           если открыта группа — возвращают на главную; иначе — закрывают весь overlay. */}
       {showSettingsTab&&(
-        <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:bg,overflowY:"auto",paddingBottom:72,animation:"pageSlideIn 0.25s cubic-bezier(0.25,0.46,0.45,0.94)"}}>
+        <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:bg,overflowY:"auto",paddingBottom:72,animation:"pageSlideIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
           {/* Заголовок настроек — динамический по settingsGroup */}
           <div style={{position:"sticky",top:0,zIndex:5,paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:15,paddingRight:15,paddingBottom:13,background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:13,flexShrink:0,backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>
             <button onClick={()=>{
@@ -10477,8 +10291,8 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
           {/* Тело — обёрнуто в div с key, чтобы React ремонтировал блок при смене группы.
               direction:forward — новая группа въезжает справа; backward — главная въезжает слева. */}
           <div key={settingsGroup||"__main"} style={{
-            animation: settingsDir==="forward"  ? "pageSlideIn 0.26s cubic-bezier(0.25,0.46,0.45,0.94)"
-                     : settingsDir==="backward" ? "pageSlideInLeft 0.26s cubic-bezier(0.25,0.46,0.45,0.94)"
+            animation: settingsDir==="forward"  ? "pageSlideIn var(--mrx-motion-control) var(--mrx-motion-out)"
+                     : settingsDir==="backward" ? "pageSlideInLeft var(--mrx-motion-control) var(--mrx-motion-out)"
                      : "none",
             willChange:"transform,opacity"
           }}>
@@ -10543,7 +10357,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         <div style={{
           display:"flex",height:"100%",
           transform:`translateX(calc(${-tabIdx*100}% + ${swipeOffset}%))`,
-          transition:isSwiping?"none":"transform 0.32s cubic-bezier(0.25,0.46,0.45,0.94)"
+          transition:isSwiping?"none":"transform 0.32s var(--mrx-motion-out)"
         }}>
           {TABS.map((tabDef,ti)=>{
             if(tabDef.id==="contacts"){
@@ -10660,10 +10474,9 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
           <div style={{
             position:"absolute",top:0,height:2,
             width:`${100/(TABS.length+1)}%`,
-            left:`${(showSettingsTab?TABS.length:tabIdx)*(100/(TABS.length+1))}%`,
+            left:0,transform:`translate3d(${(showSettingsTab?TABS.length:tabIdx)*100}%,0,0)`,
             background:accent,borderRadius:2,
-            boxShadow:`0 0 8px ${accent}88`,
-            transition:"left 0.32s cubic-bezier(0.25,0.46,0.45,0.94)"
+            transition:"transform var(--mrx-motion-surface) var(--mrx-motion-out)"
           }}/>
         </div>
         <div style={{display:"flex",alignItems:"center",height:60}}>
@@ -10682,7 +10495,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
                 <div style={{lineHeight:0,
                   color:isActive?accent:text2,
                   opacity:isActive?1:0.55,
-                  transition:"all 0.22s cubic-bezier(0.34,1.56,0.64,1)",
+                  transition:"transform var(--mrx-motion-control) var(--mrx-motion-out), opacity var(--mrx-motion-press), color var(--mrx-motion-press)",
                   transform:isActive?"scale(1.12) translateY(-1px)":"scale(1)"
                 }}>{t.Ic?<t.Ic size={23}/>:<span style={{fontSize:22}}>{t.icon}</span>}</div>
                 <div style={{fontSize:10,color:isActive?accent:text2,fontWeight:isActive?700:400,transition:"color 0.2s"}}>{t.label}</div>
@@ -10696,7 +10509,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
       {/* ── Chat Context Menu ── */}
       {ctxChat&&(<><div style={{position:"fixed",inset:0,zIndex:149,background:"rgba(0,0,0,0.45)",animation:ctxClosing?"fadeOutQ 0.3s ease forwards":"fadeInQ 0.25s ease"}} onClick={closeCtx}/>
         <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:500,background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)"}} onClick={()=>setCtxChat(null)}>
-          <div style={{position:"fixed",bottom:0,left:0,right:0,background:surface,borderRadius:"22px 22px 0 0",paddingBottom:"max(env(safe-area-inset-bottom,16px),16px)",boxShadow:"0 -8px 40px rgba(0,0,0,0.6)",animation:ctxClosing?"sheetDownQ 0.3s cubic-bezier(0.4,0,1,1) forwards":"sheetUpQ 0.34s cubic-bezier(0.22,1,0.36,1)"}} onClick={e=>e.stopPropagation()}>
+          <div style={{position:"fixed",bottom:0,left:0,right:0,background:surface,borderRadius:"22px 22px 0 0",paddingBottom:"max(env(safe-area-inset-bottom,16px),16px)",boxShadow:"0 -8px 40px rgba(0,0,0,0.6)",animation:ctxClosing?"sheetDownQ 0.3s var(--mrx-motion-exit) forwards":"sheetUpQ var(--mrx-motion-surface) var(--mrx-motion-out)"}} onClick={e=>e.stopPropagation()}>
             {/* Handle */}
             <div style={{width:36,height:4,borderRadius:2,background:border,margin:"10px auto 14px"}}/>
             {/* Chat info */}
@@ -10810,6 +10623,15 @@ function AppInner(){
   const[finding,setFinding]=useState(false);
   const[editing,setEditing]=useState(false);
   const[viewProfileUid,setViewProfileUid]=useState(null);
+  const[stickerRequest,setStickerRequest]=useState(null);
+  const[stickerLibraryEnabled,setStickerLibraryEnabled]=useState(false);
+  const stickerRequestRef=useRef(null);
+  stickerRequestRef.current=stickerRequest;
+  const stickerLibrary=useStickerPacks(fbUser?.uid,stickerLibraryEnabled);
+  const openStickerPack=useCallback(request=>{
+    setStickerLibraryEnabled(true);
+    setStickerRequest(request);
+  },[]);
   const[themeName,setThemeName]=useState(()=>{
     const saved=localStorage.getItem("rmg_theme");
     if(saved)return saved;
@@ -10826,6 +10648,15 @@ function AppInner(){
   const[online,setOnline]=useState(navigator.onLine);
   const[wsState,setWsState]=useState("open"); // "open" | "connecting" | "closed" — для заголовка как в Telegram
   const[minSplashDone,setMinSplashDone]=useState(false);
+  const chatListLayer=useRef(null);
+  const chatLayer=useRef(null);
+  const closeChat=useCallback(()=>setScreenAnim("toList"),[]);
+  const finishChatMotion=useCallback(phase=>{
+    if(phase==="toList")setScreen("list");
+    setScreenAnim("none");
+  },[]);
+  useChatMotion(screenAnim,chatListLayer,chatLayer,finishChatMotion,activeChat?.id,
+    !!fbUser&&minSplashDone&&!editing&&!finding);
   const updateProfileLocal=useCallback(patch=>{
     if(!patch||typeof patch!=="object")return;
     setProfile(prev=>{
@@ -10948,7 +10779,7 @@ function AppInner(){
 
   // Минимальная длительность заставки — проигрывается даже без интернета
   useEffect(()=>{
-    const t=setTimeout(()=>setMinSplashDone(true),950);
+    const t=setTimeout(()=>setMinSplashDone(true),350);
     return()=>clearTimeout(t);
   },[]);
 
@@ -10995,6 +10826,7 @@ function AppInner(){
       if(nowTs-(window.__rmgLastBack||0)<600)return;
       window.__rmgLastBack=nowTs;
 
+      if(stickerRequestRef.current){window.dispatchEvent(new Event("mrx:close-sticker-pack"));return;}
       if(_storyBackHandler){
         try{ if(_storyBackHandler())return; }catch(err){}
       }
@@ -11035,7 +10867,7 @@ function AppInner(){
       if(_chatListBackHandler){try{ if(_chatListBackHandler())return; }catch(err){}}
       // Предпросмотр истории (композер) — закрывается раньше минимизации
       if(_storyComposerClose){try{ _storyComposerClose(); return; }catch(err){}}
-      if(screenRef.current==="chat"){setScreenAnim("toList");setTimeout(()=>setScreen("list"),320);return;}
+      if(screenRef.current==="chat"){closeChat();return;}
       // На главном экране — сворачиваем, НЕ выходим
       try{
         if(window?.Capacitor?.Plugins?.App?.minimizeApp){
@@ -11075,52 +10907,41 @@ function AppInner(){
     };
   },[]);
 
-  useEffect(()=>onAuthStateChanged(auth,async user=>{
+  useEffect(()=>onAuthStateChanged(auth,user=>{
+    let cachedUid, cachedProfile;
+    try{
+      cachedUid=localStorage.getItem("rmg_cached_uid");
+      cachedProfile=JSON.parse(localStorage.getItem("rmg_cached_profile")||"null");
+    }catch{ /* local storage can be unavailable */ }
     if(user){
-      // Try to get profile from Firestore
-      try{
-        const s=await getDoc(doc(db,"users",user.uid));
-        const d=s.data();
-        if(d){
-          setProfile(d);
-          if(d?.theme&&d.theme!=="light")setThemeName(d.theme);
-          // Register on Go server
-          serverRegister({uid:user.uid,...d});
-          // Cache profile locally for offline
-          localStorage.setItem("rmg_cached_profile",JSON.stringify(d));
-          localStorage.setItem("rmg_cached_uid",user.uid);
-        }
-      }catch(e){
-        // Offline - load cached profile
-        const cached=localStorage.getItem("rmg_cached_profile");
-        if(cached){const d=JSON.parse(cached);setProfile(d);if(d?.theme)setThemeName(d.theme);}
-      }
+      const initial=cachedUid===user.uid&&cachedProfile
+        ?cachedProfile
+        :{uid:user.uid,name:user.displayName||"",photo:user.photoURL||null};
+      setProfile(previous=>previous?.uid===user.uid?previous:initial);
+      if(initial.theme&&initial.theme!=="light")setThemeName(initial.theme);
       setFbUser(user);
-    }
-    else{
-      // Check if we have cached session for offline mode
-      const cachedUid=localStorage.getItem("rmg_cached_uid");
-      const cachedProfile=localStorage.getItem("rmg_cached_profile");
-      if(cachedUid&&cachedProfile&&!navigator.onLine){
-        // Offline - use cached data
-        const d=JSON.parse(cachedProfile);
-        setProfile(d);
-        if(d?.theme)setThemeName(d.theme);
-        // Create a fake user object for offline mode
-        setFbUser({uid:cachedUid,displayName:d.name,isAnonymous:false,_offline:true});
-      }else{
-        setFbUser(null);setProfile(null);
-      }
+    }else if(cachedUid&&cachedProfile&&!navigator.onLine){
+      setProfile(cachedProfile);
+      if(cachedProfile.theme)setThemeName(cachedProfile.theme);
+      setFbUser({uid:cachedUid,displayName:cachedProfile.name,isAnonymous:false,_offline:true});
+    }else{
+      setFbUser(null);setProfile(null);
     }
   }),[]);
 
   useEffect(()=>{
     if(!fbUser?.uid||fbUser._offline)return;
+    let first=true;
     return onSnapshot(doc(db,"users",fbUser.uid),snap=>{
       if(!snap.exists())return;
-      const next={...snap.data()};
+      const next=snap.data();
       setProfile(next);
-      try{localStorage.setItem("rmg_cached_profile",JSON.stringify(next));}catch(e){}
+      if(first&&next.theme&&next.theme!=="light")setThemeName(next.theme);
+      first=false;
+      try{
+        localStorage.setItem("rmg_cached_profile",JSON.stringify(next));
+        localStorage.setItem("rmg_cached_uid",fbUser.uid);
+      }catch{ /* profile still available in memory */ }
     },()=>{});
   },[fbUser?.uid,fbUser?._offline]);
 
@@ -11206,63 +11027,52 @@ function AppInner(){
     }
   };
 
-  // ── Диплинки: /u/<tag> → профиль; /channel/<tag>, /group/<tag> → чат ──────
-  // Ссылку ловит intent-filter + CapApp (глобальный парсер выше). Здесь
-  // находим пользователя/чат по тегу и открываем нужный экран.
   useEffect(()=>{
-    if(!fbUser||!profile)return; // ждём логина и профиля
-    if(typeof window.rmgSetDeeplinkHandler!=="function")return;
+    if(!fbUser||fbUser._offline)return;
     window.rmgSetDeeplinkHandler(async(kind,tag)=>{
+      if(kind==="stickers"){openStickerPack({kind:"preview",id:tag});return;}
       try{
-        setToast({icon:"…",title:"Открываем ссылку…"})  ;
         if(kind==="u"){
-          const snap=await getDocs(query(collection(db,"users"),where("tag","==",tag)));
-          if(snap.empty){setToast({icon:"!",title:"Не найдено",body:`Пользователь @${tag} не найден`});return;}
-          const u=snap.docs[0].data();
-          setViewProfileUid(u.uid||snap.docs[0].id);
+          const snap=await getDocs(query(collection(db,"users"),where("tag","==",tag.toLowerCase())));
+          const person=snap.docs[0]||await getDoc(doc(db,"users",tag));
+          if(!person.exists()){
+            setToast({icon:"!",title:"Пользователь не найден"});return;
+          }
+          setViewProfileUid(person.data().uid||person.id);
           return;
         }
-        // channel/group: ищем чат по tag
-        let snap=await getDocs(query(collection(db,"chats"),where("tag","==",tag)));
-        let doc_,data;
-        if(!snap.empty){doc_=snap.docs[0];data=doc_.data();}
-        else{
-          // fallback: ссылка могла быть сгенерирована с chat.id вместо tag
-          doc_=await getDoc(doc(db,"chats",tag));data=doc_.exists()?doc_.data():null;
+        let target;
+        if(kind!=="chat"){
+          const snap=await getDocs(query(collection(db,"chats"),where("type","==",kind),where("tag","==",tag.toLowerCase())));
+          target=snap.docs[0];
         }
-        if(!data){setToast({icon:"!",title:"Не найдено",body:"Чат или канал не найден"});return;}
-        // Являемся участником? → открываем; иначе → профиль-превью чата:
-        // пользователь увидит чат после вступления через кнопку (существующий
-        // экран вступления/чата сам предлагает вступить).
+        target=target||await getDoc(doc(db,"chats",tag));
+        let data=target.exists()?target.data():null;
+        if(!data||(kind==="chat"?data.type==="group"||data.type==="channel":data.type!==kind)){
+          setToast({icon:"!",title:"Чат не найден или недоступен"});return;
+        }
         const me=fbUser.uid;
-        const member=(data.members||[]).includes(me);
-        if(member){
-          setActiveChat({id:doc_.id,...data});
-          setScreenAnim("toChat");
-          setScreen("chat");
-        }else{
-          // Не участник: для каналов/групп открываем чат — ChatScreen сам
-          // обработает не-участника (read-only до вступления), а если чат
-          // приватный без tag — покажем тост.
-          if(kind==="channel"||kind==="group"){
-            // добавляемся, только если чат публичный (есть tag)
-            if(data.tag){
-              await updateDoc(doc(db,"chats",doc_.id),{members:arrayUnion(me)}).catch(()=>{});
-              // Оповещение о вступлении по ссылке
-              addDoc(collection(db,"chats",doc_.id,"messages"),{
-                type:"system",text:`${profile?.name||"Новый участник"} присоединился по ссылке`,
-                uid:me,author:"",createdAt:serverTimestamp(),time:timeNow()
-              }).catch(()=>{});
-              const fresh=(await getDoc(doc(db,"chats",doc_.id))).data()||data;
-              setActiveChat({id:doc_.id,...fresh,members:[...(fresh.members||[]),me]});
-            }
-            setActiveChat({id:doc_.id,...data});
-            setScreenAnim("toChat");
-            setScreen("chat");
-          }else{
-            setToast({icon:"!",title:"Нет доступа",body:"Это приватный чат"});
+        if(!(data.members||[]).includes(me)){
+          if(kind==="chat"||!data.tag){
+            setToast({icon:"!",title:"Ссылка доступна только участникам чата"});return;
           }
+          if(data.settings?.joinApproval){
+            setToast({icon:"!",title:"Для вступления нужно одобрение администратора"});return;
+          }
+          const chatRef=doc(db,"chats",target.id);
+          await updateDoc(chatRef,{members:arrayUnion(me)});
+          data=(await getDoc(chatRef)).data();
+          if(!data?.members?.includes(me))throw new Error("Не удалось вступить в чат");
+          addDoc(collection(db,"chats",target.id,"messages"),{
+            type:"system",text:`${profile?.name||"Новый участник"} присоединился по ссылке`,
+            uid:me,author:"",createdAt:serverTimestamp(),time:timeNow()
+          }).catch(()=>{});
         }
+        setViewProfileUid(null);
+        setFinding(false);
+        setActiveChat({...data,id:target.id});
+        setScreenAnim("toChat");
+        setScreen("chat");
       }catch(e){
         setToast({icon:"!",title:"Ссылка не открыта",body:e?.message||String(e)});
       }
@@ -11283,7 +11093,7 @@ function AppInner(){
     .msgs-list{will-change:scroll-position;contain:paint layout}
     #root{height:100%;width:100%}
     ::-webkit-scrollbar{width:2px}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
-    .rmg-audio-btn{transition:transform 0.16s cubic-bezier(.34,1.56,.64,1),opacity 0.16s,background 0.2s,color 0.2s}
+    .rmg-audio-btn{transition:transform var(--mrx-motion-press) var(--mrx-motion-out),opacity var(--mrx-motion-press),background 0.2s,color 0.2s}
     .rmg-audio-btn:active{transform:scale(0.82);opacity:0.7}
     .rmg-audio-btn-lg:active{transform:scale(0.9)}
     .rmg-audio-toggle{transition:transform 0.25s cubic-bezier(.34,1.56,.64,1),background 0.2s,color 0.2s}
@@ -11291,13 +11101,9 @@ function AppInner(){
     @keyframes rmgTogglePop{0%{transform:scale(1)}45%{transform:scale(1.22)}100%{transform:scale(1)}}
     @keyframes rmgQueueOpen{from{opacity:0;transform:translateY(-8px) scaleY(0.94);transform-origin:top}to{opacity:1;transform:none}}
     @keyframes rmgQueueClose{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-8px) scaleY(0.94);transform-origin:top}}
-    @keyframes rmgPlayPulse{0%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 var(--rmg-accent-b)}70%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 14px transparent}100%{box-shadow:0 6px 24px var(--rmg-accent-a),0 0 0 0 transparent}}
-    @keyframes rmgRowIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
-    @keyframes msgIn{0%{opacity:0;transform:translateY(16px) scale(0.92)}50%{opacity:1;transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:none}}
-    /* Баблы выезжают СБОКУ: свои — справа налево, чужие — слева направо.
-       Плавно: длинный мягкий выезд + едва заметный докат, без резких пружин */
+    @keyframes rmgRowIn{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:none}}
+    @keyframes msgIn{from{opacity:0;transform:translateY(48px) scale(.85)}to{opacity:1;transform:none}}
     @keyframes msgInMe{0%{opacity:0;transform:translateX(62px)}75%{opacity:1;transform:translateX(-3px)}100%{opacity:1;transform:none}}
-    @keyframes msgInThem{0%{opacity:0;transform:translateX(-62px)}75%{opacity:1;transform:translateX(3px)}100%{opacity:1;transform:none}}
     @keyframes bubbleIn{from{opacity:0;transform:scale(0.88) translateY(6px)}to{opacity:1;transform:none}}
     @keyframes splashRing{from{transform:scale(0.88);opacity:0.7}to{transform:scale(1.3);opacity:0}}
     @keyframes circleIn{from{opacity:0;transform:scale(0.65)}to{opacity:1;transform:scale(1)}}
@@ -11319,21 +11125,16 @@ function AppInner(){
     @keyframes jumpFlashQ{0%{background:rgba(255,0,0,0.22)}100%{background:transparent}}
     @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
     @keyframes slideDown{from{opacity:1;transform:none}to{opacity:0;transform:translateY(20px)}}
-    @keyframes emojiPanelIn{0%{opacity:0;transform:translateY(100%)}60%{opacity:1}100%{opacity:1;transform:translateY(0)}}
-    @keyframes emojiPanelOut{0%{opacity:1;transform:translateY(0)}100%{opacity:0;transform:translateY(100%)}}
     @keyframes emojiPop{0%{transform:scale(0.6);opacity:0}60%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
-    .emoji-tabs-row::-webkit-scrollbar{display:none}
-    .emoji-tabs-row{scrollbar-width:none;-ms-overflow-style:none}
-    .emoji-grid-scroll::-webkit-scrollbar{width:4px}
-    .emoji-grid-scroll::-webkit-scrollbar-thumb{background:rgba(128,128,128,0.35);border-radius:4px}
     @keyframes popIn{from{opacity:0;transform:scale(0.35)}to{opacity:1;transform:scale(1)}}
     @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
     @keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(-18px) scale(0.92)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
     @keyframes toastOut{from{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}to{opacity:0;transform:translateX(-50%) translateY(-12px) scale(0.96)}}
     @keyframes toastProgress{from{transform:scaleX(1)}to{transform:scaleX(0)}}
-    @keyframes storyIn{from{opacity:0;transform:scale(1.025)}to{opacity:1;transform:scale(1)}}
-    @keyframes storyOut{from{opacity:1;transform:scale(1)}to{opacity:0;transform:scale(0.985)}}
-    @keyframes profileOut{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(34px)}}
+    @keyframes storyIn{from{opacity:0;transform:translateY(18px) scale(.975)}to{opacity:1;transform:none}}
+    @keyframes storyOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(18px) scale(.98)}}
+    @keyframes profileIn{from{opacity:0;transform:translate3d(0,12%,0)}to{opacity:1;transform:none}}
+    @keyframes profileOut{from{opacity:1;transform:none}to{opacity:0;transform:translate3d(0,12%,0)}}
     @keyframes sheetUp{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:translateY(0)}}
     @keyframes authCardIn{from{opacity:0;transform:translateY(24px) scale(0.97)}to{opacity:1;transform:none}}
     @keyframes authLogoPop{0%{opacity:0;transform:scale(0.4) rotate(-12deg)}60%{transform:scale(1.08) rotate(3deg)}100%{opacity:1;transform:scale(1) rotate(0deg)}}
@@ -11347,11 +11148,6 @@ function AppInner(){
     @keyframes pageSlideIn{from{opacity:0;transform:translateX(40px)}to{opacity:1;transform:none}}
     @keyframes pageSlideInLeft{from{opacity:0;transform:translateX(-40px)}to{opacity:1;transform:none}}
     @keyframes pageSlideOut{from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(100%)}}
-    @keyframes chatSlideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
-    @keyframes chatSlideOut{0%{transform:translateX(0)}100%{transform:translateX(100%)}}
-    @keyframes listSlideOut{from{transform:translateX(0);filter:brightness(1)}to{transform:translateX(-28%);filter:brightness(0.72)}}
-    @keyframes listSlideIn{0%{transform:translateX(-28%);filter:brightness(0.72)}100%{transform:translateX(0);filter:brightness(1)}}
-    @keyframes chatSwipeBack{from{transform:translateX(var(--swipe-x,0px));opacity:1}to{transform:translateX(100%);opacity:0}}
     @keyframes bottomNavIn{from{transform:translateY(100%)}to{transform:none}}
     @keyframes listIn{from{opacity:0;transform:translateX(-14px)}to{opacity:1;transform:none}}
     @keyframes spin{to{transform:rotate(360deg)}}
@@ -11367,8 +11163,8 @@ function AppInner(){
     @keyframes creatorSheen{0%{background-position:220% center}100%{background-position:-20% center}}
     input::placeholder,textarea::placeholder{color:${theme.text2}55}
     button{-webkit-user-select:none;user-select:none}
-    .rmg-press{transition:transform 0.16s cubic-bezier(0.34,1.56,0.64,1),opacity 0.16s}
-    .rmg-press:active{transform:scale(0.88);opacity:0.7}
+    .rmg-press{transition:transform var(--mrx-motion-control) var(--mrx-motion-out),opacity var(--mrx-motion-press)}
+    .rmg-press:active{transform:scale(.94);opacity:.82;transition-duration:var(--mrx-motion-press)}
     .rmg-skel{background:linear-gradient(90deg,rgba(128,128,128,0.14) 25%,rgba(128,128,128,0.3) 50%,rgba(128,128,128,0.14) 75%);background-size:200% 100%;animation:skelShimmer 1.15s linear infinite}
     @keyframes skelShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
     /* Плавная клавиатура: на время движения IME отключаем дорогой backdrop-filter
@@ -11469,11 +11265,14 @@ function AppInner(){
       <style>{CSS}</style>
       <ConfirmHost/>
       <PromptHost/>
-      <div style={{height:"100vh",position:"relative",overflow:"hidden",animation:"fadeIn 0.4s ease both"}}>
+      {fbUser&&stickerRequest&&<StickerPackDialog key={fbUser.uid+":"+stickerRequest.kind+":"+(stickerRequest.id||"")}
+        request={stickerRequest} uid={fbUser.uid} library={stickerLibrary} theme={theme}
+        accentText={contrastOn(theme.accent)} onClose={()=>setStickerRequest(null)}/>}
+      <div data-chat-motion={screenAnim} style={{height:"100vh",position:"relative",overflow:"hidden",animation:"fadeIn 0.4s ease both"}}>
 
         {/* ── Liquid Glass animated background ── */}
         {isGlass&&(
-          <div style={{position:"fixed",inset:0,zIndex:0,overflow:"hidden",pointerEvents:"none"}}>
+          <div className="mrx-ambient" style={{position:"fixed",inset:0,zIndex:0,overflow:"hidden",pointerEvents:"none"}}>
             {/* Deep bg */}
             {!isCrystal&&<div style={{position:"absolute",inset:0,background:"linear-gradient(135deg,#0a0a2e 0%,#0d1a3a 40%,#0a0a1a 100%)"}}/>}
             {isCrystal&&<div style={{position:"absolute",inset:0,background:"linear-gradient(135deg,#000510 0%,#030818 50%,#000305 100%)"}}/>}
@@ -11515,15 +11314,8 @@ function AppInner(){
         ):finding?(
           <FindPeople currentUser={fbUser} profile={profile} onClose={()=>setFinding(false)} onStartChat={chat=>{setFinding(false);setActiveChat(chat);setScreenAnim("toChat");setScreen("chat");}}/>
         ):(
-          <div style={{position:"relative",width:"100%",height:"100%",overflow:"hidden"}}>
-            {/* ChatList — уходит влево при входе в чат, возвращается справа при выходе */}
-            <div style={{
-              position:"absolute",inset:0,willChange:"transform",
-              animation:screenAnim==="toChat"?"listSlideOut 0.34s cubic-bezier(0.32,0.72,0,1) forwards"
-                :screenAnim==="toList"?"listSlideIn 0.34s cubic-bezier(0.32,0.72,0,1) forwards":"none",
-              pointerEvents:screen==="chat"?"none":"auto",
-              zIndex:screen==="list"?1:0,
-            }}>
+          <div className="mrx-chat-stack" data-screen={screen} data-motion={screenAnim}>
+            <div ref={chatListLayer} className="mrx-chat-list-layer" inert={screen==="chat"}>
               <ChatList currentUser={fbUser} profile={profile}
                 online={online} wsState={wsState}
                 onOpen={chat=>{setActiveChat(chat);setScreenAnim("toChat");setScreen("chat");}}
@@ -11539,20 +11331,15 @@ function AppInner(){
                   await signOut(auth);
                 }}/>
             </div>
-            {/* ChatScreen — въезжает справа, уезжает вправо */}
             {activeChat&&(
-              <div style={{
-                position:"absolute",inset:0,willChange:"transform",boxShadow:"-12px 0 36px rgba(0,0,0,0.35)",
-                animation:screenAnim==="toChat"?"chatSlideIn 0.34s cubic-bezier(0.32,0.72,0,1) forwards"
-                  :screenAnim==="toList"?"chatSlideOut 0.34s cubic-bezier(0.32,0.72,0,1) forwards":"none",
-                pointerEvents:screen==="list"?"none":"auto",
-                zIndex:screen==="chat"?1:0,
-              }}>
-                <ChatErrorBoundary onBack={()=>{setScreenAnim("toList");setTimeout(()=>setScreen("list"),320);}}>
-                  <ChatScreen key={activeChat.id} chat={activeChat} currentUser={fbUser} profile={profile} isActive={screen==="chat"}
-                    onBack={()=>{setScreenAnim("toList");setTimeout(()=>setScreen("list"),320);}}
+              <div ref={chatLayer} className="mrx-chat-layer" inert={screen==="list"||screenAnim==="toList"}>
+                <ChatErrorBoundary onBack={closeChat}>
+                  <ChatScreen key={activeChat.id} chat={activeChat} currentUser={fbUser} profile={profile}
+                    isActive={screen==="chat"&&screenAnim==="none"} onBack={closeChat}
                     onViewProfile={uid=>setViewProfileUid(uid)} showToast={setToast}
-                    wallpaperId={wallpaperId} msgFontSize={msgFontSize} chats={appChats}/>
+                    wallpaperId={wallpaperId} msgFontSize={msgFontSize} chats={appChats}
+                    stickerPacks={stickerLibrary.packs} onStickerLibraryUse={()=>setStickerLibraryEnabled(true)}
+                    onStickerPack={openStickerPack}/>
                 </ChatErrorBoundary>
               </div>
             )}

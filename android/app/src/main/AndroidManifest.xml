@@ -45,19 +45,19 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Диплинки: https://redmrxgram.duckdns.org/u/<tag> (профиль),
-                 /channel/<tag>, /group/<tag> (чаты). autoVerify — для
-                 App Links; без цифровой подписи assetlinks Android всё равно
-                 предложит открыть приложение (Disambiguation). -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="redmrxgram.duckdns.org" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="mrx-recovery.onrender.com" />
+                <data android:pathPrefix="/u/" />
+                <data android:pathPrefix="/group/" />
+                <data android:pathPrefix="/channel/" />
+                <data android:pathPrefix="/chat/" />
+                <data android:pathPrefix="/stickers/" />
             </intent-filter>
-            <!-- Фирменная схема mrx:// — работает ВСЕГДА, без проверки домена
-                 (custom scheme Android открывает напрямую, без панельки).
-                 Формат: mrx://u/<tag> | mrx://channel/<tag> | mrx://group/<tag> -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

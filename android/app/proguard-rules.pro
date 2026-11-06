@@ -19,3 +19,20 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# The Capacitor bridge reads these annotations at runtime, including nested permissions.
+-keep @interface com.getcapacitor.annotation.CapacitorPlugin { *; }
+-keep @interface com.getcapacitor.annotation.Permission { *; }
+-keep @interface com.getcapacitor.annotation.PermissionCallback { *; }
+-keep @interface com.getcapacitor.annotation.ActivityCallback { *; }
+-keep @interface com.getcapacitor.NativePlugin { *; }
+-keep @interface com.getcapacitor.PluginMethod { *; }
+-keepclassmembers class com.getcapacitor.Plugin {
+    @com.getcapacitor.PluginMethod public <methods>;
+}
+
+# Tink references these compile-time Error Prone annotations.
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.CheckReturnValue
+-dontwarn com.google.errorprone.annotations.Immutable
+-dontwarn com.google.errorprone.annotations.RestrictedApi

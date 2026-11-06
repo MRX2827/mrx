@@ -3,7 +3,7 @@
 // Реализован ровно тот набор функций, который использует App.jsx.
 // ────────────────────────────────────────────────────────────────────────────
 
-import { api, mediaUrl, portableMediaUrl, subscribe } from "./core.js";
+import { api, mediaUrl, portableMediaUrl, snapshotFallbackDelay, subscribe } from "./core.js";
 
 // ── Timestamp ───────────────────────────────────────────────────────────────────
 
@@ -179,6 +179,7 @@ function makeQuerySnap(docsRaw, colPath, prevMap) {
   const docs = (docsRaw || []).map((r) =>
     makeDocSnap(r.id, true, r.data, colPath + "/" + r.id)
   );
+  const currentMap = new Map((docsRaw || []).map(r => [r.id, JSON.stringify(r.data)]));
   const snap = {
     docs,
     empty: docs.length === 0,
@@ -194,7 +195,7 @@ function makeQuerySnap(docsRaw, colPath, prevMap) {
           changes.push({ type: "added", doc: dSnap, newIndex: i, oldIndex: -1 });
         } else if (!prevMap.has(dSnap.id)) {
           changes.push({ type: "added", doc: dSnap, newIndex: i, oldIndex: -1 });
-        } else if (prevMap.get(dSnap.id) !== JSON.stringify(docsRaw[i].data)) {
+        } else if (prevMap.get(dSnap.id) !== currentMap.get(dSnap.id)) {
           changes.push({ type: "modified", doc: dSnap, newIndex: i, oldIndex: i });
         }
       });
@@ -213,7 +214,7 @@ function makeQuerySnap(docsRaw, colPath, prevMap) {
       return changes;
     },
   };
-  snap.__map = new Map((docsRaw || []).map((r) => [r.id, JSON.stringify(r.data)]));
+  snap.__map = currentMap;
   return snap;
 }
 
@@ -256,55 +257,50 @@ export function onSnapshot(refOrQuery, onNext, onError) {
   const cb = typeof onNext === "function" ? onNext : onNext && onNext.next;
   const ecb = typeof onNext === "function" ? onError : onNext && onNext.error;
 
-  if (refOrQuery.__type === "doc") {
-    let delivered = false;
-    const unsub = subscribe(
-      { kind: "doc", path: refOrQuery.__path },
-      (m) => {
-        if (m.type !== "doc" || !m.doc) return;
-        delivered = true;
-        try {
-          cb(makeDocSnap(m.doc.id, !!m.doc.exists, m.doc.data, refOrQuery.__path));
-        } catch (e) {}
-      }
-    );
-    // REST-дубль на случай, если WS ещё не успел подключиться
-    getDoc(refOrQuery)
-      .then((s) => {
-        if (!delivered) {
-          delivered = true;
-          cb(s);
-        }
-      })
-      .catch((e) => {
-        if (ecb && !delivered) ecb(e);
-      });
-    return unsub;
-  }
-
-  const q = refOrQuery.__type === "query" ? refOrQuery : query(refOrQuery);
-  const sq = toServerQuery(q);
-  let prevMap = null;
   let delivered = false;
-  const deliver = (docsRaw) => {
-    const snap = makeQuerySnap(docsRaw || [], sq.collection, prevMap);
-    prevMap = snap.__map;
+  let disposed = false;
+  let timer;
+  let prevMap = null;
+  const deliver = (snapshot) => {
+    if (disposed) return;
     delivered = true;
-    try {
-      cb(snap);
-    } catch (e) {}
+    clearTimeout(timer);
+    try { cb(snapshot); } catch { /* isolate snapshot consumers */ }
   };
-  const unsub = subscribe({ kind: "query", query: sq }, (m) => {
-    if (m.type === "snap") deliver(m.docs);
+
+  const isDoc = refOrQuery.__type === "doc";
+  const path = refOrQuery.__path;
+  const sq = isDoc ? null : toServerQuery(
+    refOrQuery.__type === "query" ? refOrQuery : query(refOrQuery)
+  );
+  const deliverQuery = (docs) => {
+    const snap = makeQuerySnap(docs || [], sq.collection, prevMap);
+    prevMap = snap.__map;
+    deliver(snap);
+  };
+  const unsub = subscribe(isDoc ? { kind: "doc", path } : { kind: "query", query: sq }, m => {
+    if (isDoc && m.type === "doc" && m.doc) {
+      deliver(makeDocSnap(m.doc.id, !!m.doc.exists, m.doc.data, path));
+    } else if (!isDoc && m.type === "snap") {
+      deliverQuery(m.docs);
+    }
   });
-  api("/q", { method: "POST", body: sq })
-    .then((r) => {
-      if (!delivered) deliver(r.docs);
-    })
-    .catch((e) => {
-      if (ecb && !delivered) ecb(e);
-    });
-  return unsub;
+
+  timer = setTimeout(async () => {
+    try {
+      const result = isDoc ? await getDoc(refOrQuery) : await api("/q", { method: "POST", body: sq });
+      if (delivered || disposed) return;
+      if (isDoc) deliver(result);
+      else deliverQuery(result.docs);
+    } catch (error) {
+      if (!delivered && !disposed && ecb) ecb(error);
+    }
+  }, snapshotFallbackDelay());
+  return () => {
+    disposed = true;
+    clearTimeout(timer);
+    unsub();
+  };
 }
 
 // ── Спец-значения ──────────────────────────────────────────────────────────────

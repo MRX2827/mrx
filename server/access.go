@@ -16,6 +16,11 @@ func chatPublic(doc map[string]interface{}) bool {
 	return tag != "" && (kind == "group" || kind == "channel")
 }
 
+func chatJoinRequiresApproval(data map[string]interface{}) bool {
+	settings, _ := data["settings"].(map[string]interface{})
+	return settings["joinApproval"] == true
+}
+
 func visibleDoc(uid, path string, data map[string]interface{}) map[string]interface{} {
 	parts := strings.Split(path, "/")
 	if len(parts) == 2 && parts[0] == "chats" {
@@ -28,6 +33,9 @@ func visibleDoc(uid, path string, data map[string]interface{}) map[string]interf
 				if value, ok := data[key]; ok {
 					out[key] = value
 				}
+			}
+			if chatJoinRequiresApproval(data) {
+				out["settings"] = map[string]interface{}{"joinApproval": true}
 			}
 			return out
 		}
@@ -56,7 +64,7 @@ func readableCollection(uid, parent string) bool {
 		return false
 	}
 	switch {
-	case parts[0] == "users" && parts[2] == "contacts":
+	case parts[0] == "users" && (parts[2] == "contacts" || parts[2] == "stickerPacks"):
 		return parts[1] == uid
 	case parts[0] == "chats" && parts[2] == "messages":
 		chat, _ := loadDocData("chats/" + parts[1])
@@ -75,6 +83,9 @@ func readableDocument(uid, path string) bool {
 	}
 	if parent == "diag" {
 		return id == "d_"+uid
+	}
+	if parent == "stickerPacks" {
+		return stickerPackID.MatchString(id)
 	}
 	parts := strings.Split(parent, "/")
 	if len(parts) == 3 && parts[0] == "stories" && (parts[2] == "likes" || parts[2] == "views") {
@@ -121,6 +132,9 @@ func allowedWrite(uid, path, method string, patch map[string]interface{}) bool {
 		return id == uid
 	case "diag":
 		return id == "d_"+uid
+	case "stickerPacks":
+		return stickerPackID.MatchString(id) && (!exists || old["owner"] == uid) &&
+			method == "PUT" && validStickerPack(uid, patch)
 	case "chats":
 		if !exists {
 			if !hasMember(patch, "members", uid) || method == "DELETE" {
@@ -145,7 +159,7 @@ func allowedWrite(uid, path, method string, patch map[string]interface{}) bool {
 		if !hasMember(old, "members", uid) {
 			memberPatch, ok := patch["members"].(map[string]interface{})
 			items, _ := memberPatch["__arrayUnion__"].([]interface{})
-			return chatPublic(old) && method == "PATCH" && fieldsOnly(patch, "members") &&
+			return chatPublic(old) && !chatJoinRequiresApproval(old) && method == "PATCH" && fieldsOnly(patch, "members") &&
 				ok && len(items) == 1 && items[0] == uid
 		}
 		if method != "PATCH" && method != "MERGE" {
@@ -185,6 +199,9 @@ func allowedWrite(uid, path, method string, patch map[string]interface{}) bool {
 	switch {
 	case parts[0] == "users" && parts[2] == "contacts":
 		return parts[1] == uid
+	case parts[0] == "users" && parts[2] == "stickerPacks":
+		return parts[1] == uid && stickerPackID.MatchString(id) &&
+			(method == "DELETE" || (method == "PUT" && len(patch) == 0))
 	case parts[0] == "stories" && (parts[2] == "likes" || parts[2] == "views"):
 		_, storyExists := loadDocData("stories/" + parts[1])
 		return storyExists && id == uid

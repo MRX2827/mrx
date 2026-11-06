@@ -1,6 +1,9 @@
 import publicKey from "./routing-key.json";
+import bundledConfig from "./routing-bootstrap.json";
 
-const fallback = { apiBase: "https://redmrxgram.duckdns.org", wsAuth: "query" };
+import { shareOrigin } from "../deep-links.js";
+
+const fallback = { apiBase: shareOrigin, wsAuth: "message" };
 const cacheKey = "rmg_signed_routes_v1";
 const configUrls = [
   "https://raw.githubusercontent.com/MRX2827/mrx/mrx-routing/config.json",
@@ -8,7 +11,7 @@ const configUrls = [
 ];
 const routeListeners = new Set();
 let current = { revision: 0, endpoints: [fallback] };
-let rawConfig;
+let verificationKey;
 let refreshing;
 let lastRefresh = -Infinity;
 let initialized;
@@ -95,25 +98,14 @@ export function refreshRoutes(force = false) {
   if (!force && Date.now() - lastRefresh < 30000) return Promise.resolve();
   lastRefresh = Date.now();
   refreshing = (async () => {
-    if (!globalThis.crypto?.subtle) return;
-    const key = await crypto.subtle.importKey("jwk", publicKey,
-      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
-    if (!rawConfig) {
-      try {
-        const raw = localStorage.getItem(cacheKey);
-        if (raw) {
-          current = await verifyConfig(raw, key);
-          rawConfig = raw;
-          setRoute(current.endpoints[0]);
-        }
-      } catch { /* continue with the built-in address */ }
-    }
+    await initializeRoutes();
+    const key = verificationKey;
+    if (!key) return;
     const results = await Promise.allSettled(configUrls.map(url => fetchConfig(url, key)));
     for (const result of results) {
       if (result.status !== "fulfilled" || result.value.config.revision <= current.revision) continue;
       current = result.value.config;
-      rawConfig = result.value.raw;
-      try { localStorage.setItem(cacheKey, rawConfig); } catch { /* optional cache */ }
+      try { localStorage.setItem(cacheKey, result.value.raw); } catch { /* optional cache */ }
     }
     const candidates = current.endpoints;
     if (candidates.length === 1) setRoute(candidates[0]);
@@ -130,6 +122,28 @@ export function refreshRoutes(force = false) {
 }
 
 export function initializeRoutes() {
-  initialized ||= refreshRoutes().catch(() => {});
+  if (initialized) return initialized;
+
+  initialized = (async () => {
+    if (!globalThis.crypto?.subtle) return;
+    verificationKey = await crypto.subtle.importKey("jwk", publicKey,
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    current = await verifyConfig(JSON.stringify(bundledConfig), verificationKey);
+    try {
+      const raw = localStorage.getItem(cacheKey);
+      if (raw) {
+        const cached = await verifyConfig(raw, verificationKey);
+        if (cached.revision > current.revision) current = cached;
+      }
+    } catch { /* use the signed configuration bundled with this build */ }
+    setRoute(current.endpoints[0]);
+
+    if (navigator.onLine) {
+      const wake = fetchWithoutCredentials(route.apiBase + "/health", 55_000);
+      void wake.response.then(res => res.body?.cancel()).catch(() => {}).finally(wake.done);
+    }
+  })().catch(() => {});
+
+  void initialized.then(() => refreshRoutes()).catch(() => {});
   return initialized;
 }

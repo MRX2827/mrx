@@ -29,6 +29,7 @@ const LS_TOPIC = "rmg_push_topic";
 let _auth;
 let _authLoaded = false;
 const authListeners = new Set();
+const pendingReads = new Map();
 
 export function loadAuth() {
   if (_authLoaded) return _auth;
@@ -42,6 +43,7 @@ export function loadAuth() {
 }
 
 export function setAuth(a) {
+  pendingReads.clear();
   _auth = a;
   _authLoaded = true;
   try {
@@ -96,24 +98,34 @@ export async function api(path, opts = {}) {
   if (!isForm) headers["Content-Type"] = "application/json";
   const tok = authToken();
   if (tok) headers["Authorization"] = "Bearer " + tok;
-  const res = await fetch(apiBase() + path, {
-    ...opts,
-    redirect: "error",
-    credentials: "omit",
-    headers,
-    body: isForm ? opts.body : opts.body != null ? JSON.stringify(opts.body) : undefined,
-  });
-  let out = null;
+  const url = apiBase() + path;
+  const method = (opts.method || "GET").toUpperCase();
+  const body = isForm ? opts.body : opts.body != null ? JSON.stringify(opts.body) : undefined;
+  const read = !opts.signal && (method === "GET" || (method === "POST" && path === "/q"));
+  const key = read ? JSON.stringify([url, method, tok, body, headers]) : null;
+  if (key && pendingReads.has(key)) return pendingReads.get(key);
+  if (!read && method !== "GET") pendingReads.clear();
+
+  const request = (async () => {
+    const res = await fetch(url, {
+      ...opts, redirect: "error", credentials: "omit", headers, body,
+      signal: opts.signal || AbortSignal.timeout?.(60_000),
+    });
+    const out = await res.json().catch(() => null);
+    if (!res.ok) {
+      const err = new Error(out?.error || "HTTP " + res.status);
+      err.status = res.status;
+      err.body = out;
+      throw err;
+    }
+    return out;
+  })();
+  if (key) pendingReads.set(key, request);
   try {
-    out = await res.json();
-  } catch (e) {}
-  if (!res.ok) {
-    const err = new Error((out && out.error) || "HTTP " + res.status);
-    err.status = res.status;
-    err.body = out;
-    throw err;
+    return await request;
+  } finally {
+    if (key && pendingReads.get(key) === request) pendingReads.delete(key);
   }
-  return out;
 }
 
 // ── WebSocket-подписки (автопереподключение + автопереподписка) ────────────
@@ -207,9 +219,9 @@ async function wsConnect() {
 
 function scheduleReconnect() {
   if (wsTimer || !subs.size || !authToken()) return;
-  wsTimer = setTimeout(async () => {
+  wsTimer = setTimeout(() => {
     wsTimer = null;
-    await refreshRoutes().catch(() => {});
+    void refreshRoutes().catch(() => {});
     void wsConnect();
   }, backoff * (0.75 + Math.random() * 0.25));
   backoff = Math.min(backoff * 1.7, 15000);
@@ -234,6 +246,10 @@ if (typeof window !== "undefined") {
     if (!document.hidden) refresh();
   });
   setInterval(() => { if (!document.hidden) refresh(); }, 300000);
+}
+
+export function snapshotFallbackDelay() {
+  return wsReady ? 1400 : 500;
 }
 
 export function subscribe(body, cb) {
