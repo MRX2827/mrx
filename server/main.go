@@ -48,6 +48,8 @@ var (
 	cfgBrevoSMTPLogin string
 	cfgBrevoSMTPKey   string
 	cfgMailFrom       string
+	cfgGoogleMailURL  string
+	cfgGoogleMailKey  string
 )
 
 func getenv(key, def string) string {
@@ -103,6 +105,11 @@ func loadConfig() {
 	cfgBrevoSMTPLogin = getenv("BREVO_SMTP_LOGIN", "")
 	cfgBrevoSMTPKey = getenv("BREVO_SMTP_KEY", "")
 	cfgMailFrom = getenv("MAIL_FROM", "")
+	cfgGoogleMailURL = getenv("GOOGLE_MAIL_URL", "")
+	cfgGoogleMailKey = getenv("GOOGLE_MAIL_SECRET", "")
+	if (cfgGoogleMailURL != "" || cfgGoogleMailKey != "") && !googleMailConfigured() {
+		log.Fatal("invalid GOOGLE_MAIL_URL or GOOGLE_MAIL_SECRET configuration")
+	}
 	if cfgNtfyURL == "" {
 		log.Println("⚠️  NTFY_URL не задан — push-уведомления отключены")
 	} else {

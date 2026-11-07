@@ -36,7 +36,7 @@ func brevoSMTPConfigured() bool {
 }
 
 func mailEnabled() bool {
-	return validEmail(cfgMailFrom) && (brevoSMTPConfigured() || cfgBrevoKey != "")
+	return googleMailConfigured() || (validEmail(cfgMailFrom) && (brevoSMTPConfigured() || cfgBrevoKey != ""))
 }
 
 func validEmail(email string) bool {
@@ -60,14 +60,19 @@ func migrateMail() {
 			log.Fatal("account schema migration failed")
 		}
 	}
-	if mailEnabled() {
-		log.Println("OK: mail verification enabled (Brevo)")
+	if googleMailConfigured() {
+		log.Println("OK: verification sender configured (Google Apps Script)")
+	} else if mailEnabled() {
+		log.Println("OK: verification sender configured (Brevo)")
 	} else {
-		log.Println("WARN: mail sender or Brevo credentials not configured - mail verification disabled")
+		log.Println("WARN: verification sender not configured; ordinary registration remains unavailable")
 	}
 }
 
 func sendMailCode(email, code string) error {
+	if googleMailConfigured() {
+		return sendGoogleMailCode(email, code)
+	}
 	if brevoSMTPConfigured() {
 		return sendBrevoSMTPCode(email, code)
 	}
