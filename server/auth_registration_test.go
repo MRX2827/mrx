@@ -122,6 +122,8 @@ func TestRegistrationAndGuestRecovery(t *testing.T) {
 		t.Fatal("legacy renamed guest must resume the same identity")
 	}
 	call("/auth/login", "POST", "", fields{"tag": "anon_savedguest", "password": "wrong password", "guestUid": uid}, 401)
+	call("/d/users/"+uid, "PATCH", token, fields{"data": fields{"tag": "guest_renamed_again"}}, 200)
+	call("/auth/login", "POST", "", fields{"tag": "guest_legacy", "password": "guest random password", "guestUid": uid}, 200)
 	call("/auth/register", "GET", "", nil, 405)
 	call("/auth/login", "GET", "", nil, 405)
 }

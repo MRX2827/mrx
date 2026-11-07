@@ -6250,11 +6250,12 @@ function AuthScreen({onAuth}){
     const snap=await getDoc(doc(db,"users",user.uid));
     if(snap.exists()){onAuth(user,snap.data());return;}
     const pp=pendingProfile.current||{};
-    const prof={uid:user.uid,name:pp.name||user.displayName||"Пользователь",tag:pp.tag||"",bio:"",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp()};
+    const prof={uid:user.uid,name:pp.name||user.displayName||"Пользователь",tag:pp.tag||user.tag||"",bio:"",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp()};
     await setDoc(doc(db,"users",user.uid),prof);
     onAuth(user,prof);
   };
   const submit=async()=>{
+    if(loading)return;
     setErr("");setInfo("");setLoading(true);
     try{
       if(mode==="register"){
@@ -6264,7 +6265,7 @@ function AuthScreen({onAuth}){
         if(!/^\S+@\S+\.\S+$/.test(email.trim())){setErr("Введи настоящую почту — на неё придёт код");setLoading(false);return;}
         const r=await registerAccount({tag:ft,name:name.trim(),email:email.trim(),password:pass});
         pendingProfile.current={name:name.trim(),tag:ft,email:email.trim().toLowerCase()};
-        if(r.pending){setPendingEmail(r.email||email.trim().toLowerCase());setCode("");switchMode("verify");setInfo("Код отправлен! Проверь почту (и папку «Спам»)");}
+        if(r.pending){setPendingEmail(r.email||email.trim().toLowerCase());setCode("");switchMode("verify");setInfo(r.codeSent===false?"Введи код из уже отправленного письма. Новый можно запросить через минуту.":"Код отправлен! Проверь почту (и папку «Спам»)");}
         else await finishAuth(r.user);
       }else if(mode==="login"){
         const cred=await signInWithEmailAndPassword(auth,loginId,pass);
@@ -6288,10 +6289,10 @@ function AuthScreen({onAuth}){
         setPendingEmail(email.trim().toLowerCase());setCode("");switchMode("verify");setInfo("Код отправлен! Проверь почту (и папку «Спам»)");
       }
     }catch(e){
-      if(e.code==="auth/email-not-verified"){setPendingEmail(e.email||(loginId.includes("@")?loginId.trim().toLowerCase():pendingEmail));setCode("");switchMode("verify");setInfo("Почта ещё не подтверждена — мы отправили новый код");}
+      if(e.code==="auth/email-not-verified"){setPendingEmail(e.email||(loginId.includes("@")?loginId.trim().toLowerCase():pendingEmail));setCode("");switchMode("verify");setInfo(e.codeSent===false?"Почта ещё не подтверждена. Введи код из уже отправленного письма.":"Почта ещё не подтверждена — мы отправили новый код");}
       else if(e.code==="auth/email-required"){setEmail("");switchMode("attach");}
       else{
-        const m={"auth/weak-password":"Пароль минимум 6 символов","auth/invalid-credential":"Неверный логин или пароль. Логин — это @юзернейм или почта","auth/invalid-code":"Неверный или просроченный код","auth/too-many-requests":"Подожди минуту и попробуй ещё раз"};
+        const m={"auth/invalid-credential":"Неверный логин или пароль. Логин — это @юзернейм или почта","auth/invalid-code":"Неверный или просроченный код","auth/too-many-requests":"Подожди минуту и попробуй ещё раз"};
         setErr(m[e.code]||e.message);
       }
     }
@@ -6376,7 +6377,7 @@ function AuthScreen({onAuth}){
         </button>
         {mode==="register"&&<div style={{color:text2,fontSize:12,textAlign:"center",marginBottom:10}}>Запомни свой @юзернейм — по нему будешь входить</div>}
         {mode==="verify"&&<div style={{textAlign:"center",marginBottom:10,display:"flex",flexDirection:"column",gap:8}}>
-          <span onMouseDown={e=>e.preventDefault()} onClick={async()=>{if(loading)return;setErr("");try{await resendEmailCode(pendingEmail);setInfo("Код отправлен ещё раз ✉️");}catch(e){setErr("Подожди минуту перед повторной отправкой");}}} style={{color:accent,fontSize:13,cursor:"pointer",fontWeight:700}}>Отправить код ещё раз</span>
+          <span onMouseDown={e=>e.preventDefault()} onClick={async()=>{if(loading)return;setErr("");try{await resendEmailCode(pendingEmail);setInfo("Код отправлен ещё раз ✉️");}catch(e){setErr(e.message||"Не удалось отправить код");}}} style={{color:accent,fontSize:13,cursor:"pointer",fontWeight:700}}>Отправить код ещё раз</span>
           <span onMouseDown={e=>e.preventDefault()} onClick={()=>{switchMode("login");setErr("");setInfo("");}} style={{color:text2,fontSize:13,cursor:"pointer"}}>← Назад ко входу</span>
         </div>}
         {mode==="attach"&&<div style={{textAlign:"center",marginBottom:10}}><span onMouseDown={e=>e.preventDefault()} onClick={()=>{switchMode("login");setErr("");setInfo("");}} style={{color:text2,fontSize:13,cursor:"pointer"}}>← Назад ко входу</span></div>}
@@ -6389,12 +6390,13 @@ function AuthScreen({onAuth}){
           <div style={{flex:1,height:1,background:border}}/><span style={{color:text2,fontSize:12}}>или войдите через</span><div style={{flex:1,height:1,background:border}}/>
         </div>
         <div style={{display:"flex",justifyContent:"center",marginBottom:22}}>
-          <button onClick={async()=>{
+          <button disabled={loading} onClick={async()=>{
+            if(loading)return;
             setErr("");setLoading(true);
             try{
               const cred=await signInAnonymously(auth);
-              const anonName="Гость"+(Math.floor(1000+Math.random()*9000));
-              const anonTag="guest"+Math.floor(10000+Math.random()*90000);
+              const anonName=cred.user.displayName||"Гость"+(Math.floor(1000+Math.random()*9000));
+              const anonTag=cred.user.tag;
               const prof={uid:cred.user.uid,name:anonName,email:"",tag:anonTag,bio:"Анонимный пользователь",photo:null,theme:"dark",createdAt:serverTimestamp(),lastSeen:serverTimestamp(),isAnonymous:true};
               const snap=await getDoc(doc(db,"users",cred.user.uid));
               if(!snap.exists())await setDoc(doc(db,"users",cred.user.uid),prof);

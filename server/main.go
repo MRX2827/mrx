@@ -543,7 +543,7 @@ func authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		user, hash, err = getUserByTag(login)
 	}
-	if errors.Is(err, sql.ErrNoRows) && strings.HasPrefix(login, "anon_") && req.GuestUID != "" {
+	if errors.Is(err, sql.ErrNoRows) && req.GuestUID != "" {
 		user, hash, err = getUserByID(req.GuestUID)
 		if err == nil && !anonymousAccount(user) {
 			user = nil

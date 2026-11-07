@@ -16,6 +16,7 @@ function makeUser(a) {
   return {
     uid: a.uid,
     email: a.email || null,
+    tag: a.tag || "",
     displayName: a.displayName || null,
     photoURL: a.photoURL || null,
     isAnonymous: !!a.isAnonymous,
@@ -35,27 +36,14 @@ export function getAuth() {
 }
 
 async function doRegister(tag, password, extra) {
-  let r;
-  try {
-    r = await api("/auth/register", {
-      method: "POST",
-      body: { tag, name: extra.name || "", email: extra.email || "", password },
-    });
-  } catch (e) {
-    if (e.status === 409) throw fbError("auth/email-already-in-use", "Аккаунт уже существует");
-    if (e.status === 400 && password.length < 6)
-      throw fbError("auth/weak-password", "Слишком короткий пароль");
-    throw fbError("auth/network-request-failed", e.message);
-  }
-  const a = {
-    uid: r.user && (r.user.id || r.user.uid),
-    token: r.token,
-    email: extra.email || null,
-    displayName: extra.name || null,
+  const result = await registerAccount({
+    tag, password, name: extra.name || "", email: extra.email || "",
     isAnonymous: !!extra.isAnonymous,
-  };
-  setAuth(a);
-  return { user: authObj.currentUser };
+  });
+  if (result.pending && extra.isAnonymous) {
+    throw fbError("auth/registration-unavailable", "Не удалось открыть гостевой аккаунт. Повтори попытку.");
+  }
+  return result;
 }
 
 export async function createUserWithEmailAndPassword(_auth, email, password) {
@@ -76,57 +64,61 @@ export async function signInWithEmailAndPassword(_auth, email, password) {
     if (e.status === 403 && be === "email_not_verified") {
       const err = fbError("auth/email-not-verified", "Почта не подтверждена");
       err.email = (e.body && e.body.email) || null;
+      err.codeSent = e.body?.codeSent !== false;
       throw err;
     }
     if (e.status === 403 && be === "email_required")
       throw fbError("auth/email-required", "Нужно привязать почту");
     if (e.status === 401 || e.status === 404 || e.status === 400)
       throw fbError("auth/invalid-credential", "Неверный логин или пароль");
-    throw fbError("auth/network-request-failed", e.message);
+    throw registrationError(e);
   }
   setAuth({
     uid: r.user && (r.user.id || r.user.uid),
     token: r.token,
-    email,
+    email: String(email).includes("@") && !String(email).startsWith("@") ? String(email).trim().toLowerCase() : null,
+    tag: r.user?.tag || "",
     displayName: (r.user && r.user.name) || null,
-    isAnonymous: false,
+    isAnonymous: r.user?.isAnonymous === true,
   });
   return { user: authObj.currentUser };
 }
 
 export async function signInAnonymously(_auth) {
-  const LS = "rmg_anon_creds";
-  let creds = null;
+  const storageKey = "rmg_anon_creds";
+  let credentials;
   try {
-    creds = JSON.parse(localStorage.getItem(LS) || "null");
-  } catch (e) {}
-  if (creds && creds.tag && creds.password) {
+    credentials = JSON.parse(localStorage.getItem(storageKey) || "null");
+    if (credentials && !credentials.uid) {
+      const cached = JSON.parse(localStorage.getItem("rmg_cached_profile") || "null");
+      if (cached?.isAnonymous) credentials.uid = cached.uid;
+    }
+  } catch { /* A new guest can be created if no saved identity exists. */ }
+  if (credentials?.tag && credentials.password) {
     try {
-      const r = await api("/auth/login", {
+      const result = await api("/auth/login", {
         method: "POST",
-        body: { tag: creds.tag, password: creds.password },
+        body: { tag: credentials.tag, password: credentials.password, guestUid: credentials.uid || "" },
       });
-      setAuth({
-        uid: r.user && (r.user.id || r.user.uid),
-        token: r.token,
-        email: null,
-        displayName: (r.user && r.user.name) || null,
-        isAnonymous: true,
-      });
+      const uid = result.user.id || result.user.uid;
+      const tag = result.user.tag || credentials.tag;
+      localStorage.setItem(storageKey, JSON.stringify({ ...credentials, uid, tag }));
+      setAuth({ uid, tag, token: result.token, email: null, displayName: result.user.name || null, isAnonymous: true });
       return { user: authObj.currentUser };
-    } catch (e) {
-      // старый анонимный аккаунт не подошёл — создаём новый
+    } catch (error) {
+      if (error.status !== 401 && error.status !== 404) throw registrationError(error);
     }
   }
-  const rand = () =>
-    Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  const tag = "anon_" + rand().slice(0, 12);
-  const password = rand() + rand();
-  const res = await doRegister(tag, password, { isAnonymous: true });
-  try {
-    localStorage.setItem(LS, JSON.stringify({ tag, password }));
-  } catch (e) {}
-  return res;
+  const random = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), byte => byte.toString(16).padStart(2, "0")).join("");
+  const tag = "anon_" + random().slice(0, 16);
+  const password = random();
+  const name = "Гость" + Math.floor(1000 + Math.random() * 9000);
+  // Persist before the request so a lost response can be resumed without
+  // replacing an already-created guest identity.
+  localStorage.setItem(storageKey, JSON.stringify({ tag, password }));
+  const result = await doRegister(tag, password, { name, isAnonymous: true });
+  localStorage.setItem(storageKey, JSON.stringify({ tag, password, uid: result.user.uid }));
+  return result;
 }
 
 export function onAuthStateChanged(_auth, cb) {
@@ -164,32 +156,45 @@ function normLogin(s) {
   return String(s || "").trim().toLowerCase().replace(/^@/, "");
 }
 
-export async function registerAccount({ tag, name, email, password }) {
-  if (!password || password.length < 6)
-    throw fbError("auth/weak-password", "Пароль минимум 6 символов");
-  let r;
+function registrationError(error) {
+  const reason = error.body?.error || error.message;
+  if (reason === "tag taken") return fbError("auth/email-already-in-use", "Этот @юзернейм уже занят. Попробуй войти или выбери другой.");
+  if (reason === "email taken") return fbError("auth/email-already-in-use", "Эта почта уже привязана. Попробуй войти.");
+  if (reason === "invalid new password") return fbError("auth/weak-password", "Пароль должен содержать минимум 6 символов и быть не длиннее 72 байт.");
+  if (reason === "email invalid") return fbError("auth/invalid-email", "Проверь, правильно ли указан адрес почты.");
+  if (reason === "invalid tag") return fbError("auth/invalid-tag", "Проверь имя пользователя.");
+  if (reason === "registration is closed" || reason === "guest registration is closed") {
+    return fbError("auth/registration-unavailable", "Регистрация временно недоступна. Повтори позже.");
+  }
+  if (error.status === 429) return fbError("auth/too-many-requests", "Подожди минуту перед повторной отправкой кода.");
+  if (error.status === 503 || reason === "mail send failed" || reason === "mail unavailable") {
+    return fbError("auth/mail-unavailable", "Письмо пока не удалось отправить. Попробуй ещё раз — юзернейм и почту менять не нужно.");
+  }
+  return fbError("auth/network-request-failed", "Нет связи с сервером. Проверь интернет и повтори попытку.");
+}
+
+export async function registerAccount({ tag, name, email, password, isAnonymous = false }) {
+  if (!password || Array.from(password).length < 6 || new TextEncoder().encode(password).length > 72) {
+    throw registrationError({ message: "invalid new password" });
+  }
+  let result;
   try {
-    r = await api("/auth/register", {
+    result = await api("/auth/register", {
       method: "POST",
       body: { tag: normLogin(tag), name: name || "", email: String(email || "").trim().toLowerCase(), password },
     });
-  } catch (e) {
-    const be = e.body && e.body.error;
-    if (e.status === 409)
-      throw fbError("auth/email-already-in-use", be === "email taken" ? "Эта почта уже занята — попробуй войти" : "Этот @юзернейм уже занят — поменяй его");
-    if (e.status === 400)
-      throw fbError("auth/invalid-email", "Похоже, в почте опечатка — проверь её");
-    if (e.status === 500)
-      throw fbError("auth/invalid-email", "Не удалось отправить письмо на эту почту — проверь адрес");
-    throw fbError("auth/network-request-failed", e.message);
+  } catch (error) {
+    throw registrationError(error);
   }
-  if (r.pending) return { pending: true, email: r.email };
+  if (result.pending) return { pending: true, email: result.email, codeSent: result.codeSent !== false };
+  if (!result.user || !result.token) throw registrationError({ message: "invalid response" });
   setAuth({
-    uid: r.user && (r.user.id || r.user.uid),
-    token: r.token,
+    uid: result.user.id || result.user.uid,
+    tag: result.user.tag || normLogin(tag),
+    token: result.token,
     email: email || null,
-    displayName: name || null,
-    isAnonymous: false,
+    displayName: result.user.name || name || null,
+    isAnonymous: isAnonymous || result.user.isAnonymous === true,
   });
   return { pending: false, user: authObj.currentUser };
 }
@@ -204,11 +209,13 @@ export async function verifyEmailCode(email, code) {
   } catch (e) {
     if (e.status === 400 || e.status === 401 || e.status === 404)
       throw fbError("auth/invalid-code", "Неверный или просроченный код");
-    throw fbError("auth/network-request-failed", e.message);
+    if (e.status === 429) throw fbError("auth/too-many-requests", "Слишком много попыток. Запроси новый код.");
+    throw registrationError(e);
   }
   setAuth({
     uid: r.user && (r.user.id || r.user.uid),
     token: r.token,
+    tag: r.user?.tag || "",
     email: String(email || "").trim().toLowerCase(),
     displayName: (r.user && r.user.name) || null,
     isAnonymous: false,
@@ -222,8 +229,8 @@ export async function resendEmailCode(email) {
       method: "POST",
       body: { email: String(email || "").trim().toLowerCase() },
     });
-  } catch (e) {
-    throw fbError("auth/too-many-requests", "Подожди минуту и попробуй ещё раз");
+  } catch (error) {
+    throw registrationError(error);
   }
 }
 
