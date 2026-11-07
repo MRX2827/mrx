@@ -18,4 +18,4 @@ services:
       - key: NTFY_URL
         value: https://ntfy.sh
       - key: ALLOW_REGISTRATION
-        value: "0"
+        value: "1"

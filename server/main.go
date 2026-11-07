@@ -194,15 +194,16 @@ func applySchema(schema string) {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type User struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Tag      string `json:"tag"`
-	Bio      string `json:"bio"`
-	PhotoURL string `json:"photoUrl"`
-	Online   bool   `json:"online"`
-	LastSeen int64  `json:"lastSeen"`
-	Email    string `json:"-"`
-	EmailOk  int    `json:"-"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Tag       string `json:"tag"`
+	Bio       string `json:"bio"`
+	PhotoURL  string `json:"photoUrl"`
+	Online    bool   `json:"online"`
+	LastSeen  int64  `json:"lastSeen"`
+	Email     string `json:"-"`
+	EmailOk   int    `json:"-"`
+	Anonymous bool   `json:"isAnonymous"`
 }
 
 type Message struct {
@@ -377,8 +378,7 @@ func jsonErr(w http.ResponseWriter, code int, msg string) {
 // ── Auth handlers ─────────────────────────────────────────────────────────────
 
 func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
-	cors(w)
-	if r.Method == "OPTIONS" {
+	if !mailPost(w, r) {
 		return
 	}
 	var req struct {
@@ -389,45 +389,77 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Email    string `json:"email"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		jsonErr(w, 400, "bad request")
 		return
 	}
-	if os.Getenv("ALLOW_REGISTRATION") != "1" && !mailEnabled() {
-		jsonErr(w, 403, "registration is closed")
+	req.Tag = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(req.Tag)), "@")
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	isGuest := strings.HasPrefix(req.Tag, "anon_")
+	openRegistration := os.Getenv("ALLOW_REGISTRATION") == "1"
+	if !openRegistration && (!mailEnabled() || isGuest) {
+		if isGuest {
+			jsonErr(w, 403, "guest registration is closed")
+		} else {
+			jsonErr(w, 403, "registration is closed")
+		}
 		return
 	}
-	if os.Getenv("ALLOW_REGISTRATION") != "1" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Tag)), "anon_") {
-		jsonErr(w, 403, "guest registration is closed")
+	if req.Tag == "" || len(req.Tag) > 120 {
+		jsonErr(w, 400, "invalid tag")
 		return
 	}
-	req.Tag = strings.ToLower(strings.TrimSpace(req.Tag))
-	if req.Tag == "" || !validNewPassword(req.Password) {
-		jsonErr(w, 400, "tag required, password min 6 chars")
+	if !validNewPassword(req.Password) {
+		jsonErr(w, 400, "invalid new password")
 		return
 	}
-	if existing, _, _ := getUserByTag(req.Tag); existing != nil {
+	needMail := mailEnabled() && !isGuest
+	if needMail && !validEmail(req.Email) {
+		jsonErr(w, 400, "email invalid")
+		return
+	}
+	if isGuest {
+		req.Email = ""
+	}
+	existing, hash, err := getUserByTag(req.Tag)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		jsonErr(w, 500, "server error")
+		return
+	}
+	if existing != nil {
+		// A retried request must resume the same account after a lost response
+		// or failed mail delivery. Knowledge of the current password is required.
+		samePassword := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) == nil
+		if !samePassword {
+			jsonErr(w, 409, "tag taken")
+			return
+		}
+		if isGuest && anonymousAccount(existing) {
+			existing.Anonymous = true
+			json.NewEncoder(w).Encode(map[string]interface{}{"user": existing, "token": makeToken(existing.ID)})
+			return
+		}
+		if needMail && existing.EmailOk == 0 && existing.Email == req.Email {
+			registrationPending(w, existing)
+			return
+		}
 		jsonErr(w, 409, "tag taken")
 		return
 	}
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	isAnon := strings.HasPrefix(req.Tag, "anon_")
-	needMail := mailEnabled() && !isAnon
 	if needMail {
-		if !validEmail(req.Email) {
-			jsonErr(w, 400, "email invalid")
+		var taken bool
+		if db.QueryRow("SELECT EXISTS(SELECT 1 FROM users WHERE email=? AND email_ok=1)", req.Email).Scan(&taken) != nil {
+			jsonErr(w, 500, "server error")
 			return
 		}
-		var n int
-		db.QueryRow("SELECT COUNT(*) FROM users WHERE email=? AND email_ok=1", req.Email).Scan(&n)
-		if n > 0 {
+		if taken {
 			jsonErr(w, 409, "email taken")
 			return
 		}
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		jsonErr(w, 500, "hash failed")
+		jsonErr(w, 500, "server error")
 		return
 	}
 	uid := newUID()
@@ -437,70 +469,102 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = db.Exec(
 		"INSERT INTO users (id, tag, name, bio, photo_url, pass_hash, created, email, email_ok) VALUES (?,?,?,?,?,?,?,?,?)",
-		uid, req.Tag, req.Name, req.Bio, req.PhotoURL, string(hash), time.Now().UnixMilli(), req.Email, emailOK,
+		uid, req.Tag, req.Name, req.Bio, req.PhotoURL, string(hashBytes), time.Now().UnixMilli(), req.Email, emailOK,
 	)
 	if err != nil {
 		jsonErr(w, 409, "tag taken")
 		return
 	}
-	if needMail {
-		if err := issueMailCode(req.Email, uid, "verify"); err != nil {
-			db.Exec("DELETE FROM users WHERE id=?", uid)
-			jsonErr(w, 500, "mail send failed")
-			return
-		}
-		log.Println("Account awaits verification")
-		json.NewEncoder(w).Encode(map[string]interface{}{"pending": true, "email": req.Email})
+	user, _, err := getUserByID(uid)
+	if err != nil {
+		jsonErr(w, 500, "server error")
 		return
 	}
-	u, _, _ := getUserByID(uid)
-	log.Println("Account registered")
-	json.NewEncoder(w).Encode(map[string]interface{}{"user": u, "token": makeToken(uid)})
+	if needMail {
+		registrationPending(w, user)
+		return
+	}
+	user.Anonymous = isGuest
+	json.NewEncoder(w).Encode(map[string]interface{}{"user": user, "token": makeToken(uid)})
+}
+
+func anonymousAccount(user *User) bool {
+	if strings.HasPrefix(user.Tag, "anon_") {
+		return true
+	}
+	profile, _ := loadDocData("users/" + user.ID)
+	return profile["isAnonymous"] == true
+}
+
+func registrationPending(w http.ResponseWriter, user *User) {
+	sent, err := registrationMailCode(user)
+	if err != nil {
+		reportMailError(w, err)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"pending": true, "email": user.Email, "codeSent": sent})
+}
+
+func registrationMailCode(user *User) (bool, error) {
+	err := issueMailCode(user.Email, user.ID, "verify")
+	if errors.Is(err, errMailCooldown) {
+		var usable bool
+		if queryErr := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM mail_codes
+			WHERE email=? AND uid=? AND purpose IN ('verify','legacy') AND tries<5 AND ts>=?)`,
+			user.Email, user.ID, time.Now().Add(-mailCodeLifetime).UnixMilli()).Scan(&usable); queryErr != nil {
+			return false, queryErr
+		}
+		if usable {
+			return false, nil
+		}
+	}
+	return err == nil, err
 }
 
 func authLoginHandler(w http.ResponseWriter, r *http.Request) {
-	cors(w)
-	if r.Method == "OPTIONS" {
+	if !mailPost(w, r) {
 		return
 	}
 	var req struct {
 		Tag      string `json:"tag"`
 		Password string `json:"password"`
+		GuestUID string `json:"guestUid"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		jsonErr(w, 400, "bad request")
 		return
 	}
-	login := strings.ToLower(strings.TrimSpace(req.Tag))
-	var u *User
-	var passHash string
-	var lerr error
+	login := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(req.Tag)), "@")
+	var user *User
+	var hash string
+	var err error
 	if strings.Contains(login, "@") {
-		u, passHash, lerr = scanUser(db.QueryRow("SELECT "+userCols+" FROM users WHERE email=? ORDER BY email_ok DESC LIMIT 1", login))
+		user, hash, err = scanUser(db.QueryRow("SELECT "+userCols+" FROM users WHERE email=? ORDER BY email_ok DESC,created DESC LIMIT 1", login))
 	} else {
-		u, passHash, lerr = getUserByTag(login)
+		user, hash, err = getUserByTag(login)
 	}
-	if lerr != nil || u == nil {
-		jsonErr(w, 401, "invalid credentials")
-		return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(passHash), []byte(req.Password)) != nil {
-		jsonErr(w, 401, "invalid credentials")
-		return
-	}
-	if mailEnabled() && !strings.HasPrefix(u.Tag, "anon_") {
-		var uEmail string
-		var uOK int
-		db.QueryRow("SELECT email, email_ok FROM users WHERE id=?", u.ID).Scan(&uEmail, &uOK)
-		if uEmail != "" && uOK == 0 {
-			issueMailCode(uEmail, u.ID, "verify")
-			w.WriteHeader(403)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_not_verified", "email": uEmail})
-			return
+	if errors.Is(err, sql.ErrNoRows) && strings.HasPrefix(login, "anon_") && req.GuestUID != "" {
+		user, hash, err = getUserByID(req.GuestUID)
+		if err == nil && !anonymousAccount(user) {
+			user = nil
 		}
 	}
-	log.Printf("🔑 Login: @%s", u.Tag)
-	json.NewEncoder(w).Encode(map[string]interface{}{"user": u, "token": makeToken(u.ID)})
+	if err != nil || user == nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
+		jsonErr(w, 401, "invalid credentials")
+		return
+	}
+	user.Anonymous = anonymousAccount(user)
+	if mailEnabled() && !user.Anonymous && user.Email != "" && user.EmailOk == 0 {
+		sent, err := registrationMailCode(user)
+		if err != nil {
+			reportMailError(w, err)
+			return
+		}
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_not_verified", "email": user.Email, "codeSent": sent})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"user": user, "token": makeToken(user.ID)})
 }
 
 // ── User handlers ─────────────────────────────────────────────────────────────

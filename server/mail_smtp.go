@@ -9,11 +9,14 @@ import (
 	"net"
 	"net/smtp"
 	"net/textproto"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const brevoSMTPHost = "smtp-relay.brevo.com"
+
+var smtpAddressPattern = regexp.MustCompile(`[^\s<>]+@[^\s<>]+`)
 
 func sendBrevoSMTPCode(email, code string) error {
 	if !validEmail(cfgMailFrom) || !validEmail(email) {
@@ -72,7 +75,16 @@ func sendBrevoSMTPCode(email, code string) error {
 
 func brevoSMTPError(stage string, err error) error {
 	if response, ok := err.(*textproto.Error); ok {
-		log.Printf("MAIL: Brevo SMTP %s failed (SMTP %d)", stage, response.Code)
+		detail := response.Msg
+		if cfgBrevoSMTPKey != "" {
+			detail = strings.ReplaceAll(detail, cfgBrevoSMTPKey, "[redacted]")
+		}
+		detail = smtpAddressPattern.ReplaceAllString(detail, "[address]")
+		detail = strings.Join(strings.Fields(detail), " ")
+		if len(detail) > 240 {
+			detail = detail[:240]
+		}
+		log.Printf("MAIL: Brevo SMTP %s failed (SMTP %d): %s", stage, response.Code, detail)
 	} else {
 		log.Printf("MAIL: Brevo SMTP %s failed", stage)
 	}
