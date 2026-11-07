@@ -167,6 +167,9 @@ function registrationError(error) {
     return fbError("auth/registration-unavailable", "Регистрация временно недоступна. Повтори позже.");
   }
   if (error.status === 429) return fbError("auth/too-many-requests", "Подожди минуту перед повторной отправкой кода.");
+  if (reason === "mail provider inactive") {
+    return fbError("auth/mail-unavailable", "Отправка кодов ещё не активирована почтовым сервисом MRX. Адрес менять не нужно. Регистрация станет доступна после активации; пока можно войти гостем.");
+  }
   if (error.status === 503 || reason === "mail send failed" || reason === "mail unavailable") {
     return fbError("auth/mail-unavailable", "Письмо пока не удалось отправить. Попробуй ещё раз — юзернейм и почту менять не нужно.");
   }

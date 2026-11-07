@@ -85,6 +85,9 @@ func brevoSMTPError(stage string, err error) error {
 			detail = detail[:240]
 		}
 		log.Printf("MAIL: Brevo SMTP %s failed (SMTP %d): %s", stage, response.Code, detail)
+		if inactiveMailPlatform(response.Msg) {
+			return errMailInactive
+		}
 	} else {
 		log.Printf("MAIL: Brevo SMTP %s failed", stage)
 	}

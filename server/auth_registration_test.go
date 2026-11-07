@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,7 +60,13 @@ func TestRegistrationAndGuestRecovery(t *testing.T) {
 		deliveries++
 		return nil
 	}
-	for _, email := range []string{"reader@proton.me", "reader@gmail.com"} {
+	for _, email := range []string{
+		"reader@proton.me", "reader@gmail.com", "reader@tuta.io",
+		"reader@mail.ru", "reader@yandex.ru", "reader@outlook.com",
+		"reader@icloud.com", "reader+signup@personal.example.org",
+		"reader@xn--e1afmkfd.xn--p1ai",
+		strings.Repeat("a", 64) + "@" + strings.Repeat("b", 63) + ".example.org",
+	} {
 		tag := "reader_" + string(rune('a'+deliveries))
 		input := fields{"tag": tag, "email": email, "password": "registration pass", "name": "Reader"}
 		pending := call("/auth/register", "POST", "", input, 200)
@@ -100,6 +108,34 @@ func TestRegistrationAndGuestRecovery(t *testing.T) {
 		t.Fatal("a mail failure must preserve the pending identity")
 	}
 	call("/auth/verify", "POST", "", fields{"email": "retry@proton.me", "code": codes["retry@proton.me"]}, 200)
+
+	// A disabled provider affects all domains. Report it accurately, never
+	// create a session, and leave the same pending account recoverable.
+	mailCodeSender = func(string, string) error {
+		return brevoSMTPError("accept message", &textproto.Error{Code: 502, Msg: "5.7.0 Your SMTP account is not yet activated"})
+	}
+	blocked := fields{"tag": "provider_blocked", "email": "blocked@tuta.io", "password": "registration pass"}
+	if failure := call("/auth/register", "POST", "", blocked, 503); failure["error"] != "mail provider inactive" || failure["token"] != nil {
+		t.Fatal("provider activation failure must be explicit and keep verification mandatory")
+	}
+	blockedUser, _, _ := getUserByTag("provider_blocked")
+	call("/auth/login", "POST", "", fields{"tag": "provider_blocked", "password": "registration pass"}, 503)
+	cfgBrevoKey = ""
+	call("/auth/login", "POST", "", fields{"tag": "provider_blocked", "password": "registration pass"}, 503)
+	call("/auth/register", "POST", "", fields{"tag": "mail_unconfigured", "email": "new@personal.example.org", "password": "registration pass"}, 503)
+	if user, _, _ := getUserByTag("mail_unconfigured"); user != nil {
+		t.Fatal("missing mail credentials must not create a verified ordinary account")
+	}
+	// Previously verified accounts remain usable when the sender is offline.
+	call("/auth/login", "POST", "", fields{"tag": "retry_user", "password": "registration pass"}, 200)
+	cfgBrevoKey = "test"
+	mailCodeSender = func(email, code string) error { codes[email] = code; return nil }
+	call("/auth/register", "POST", "", blocked, 200)
+	resumed, _, _ := getUserByTag("provider_blocked")
+	if resumed.ID != blockedUser.ID {
+		t.Fatal("activation must resume the pending account")
+	}
+	call("/auth/verify", "POST", "", fields{"email": "blocked@tuta.io", "code": codes["blocked@tuta.io"]}, 200)
 
 	guestInput := fields{"tag": "anon_savedguest", "password": "guest random password"}
 	t.Setenv("ALLOW_REGISTRATION", "0")

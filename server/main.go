@@ -397,12 +397,8 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	isGuest := strings.HasPrefix(req.Tag, "anon_")
 	openRegistration := os.Getenv("ALLOW_REGISTRATION") == "1"
-	if !openRegistration && (!mailEnabled() || isGuest) {
-		if isGuest {
-			jsonErr(w, 403, "guest registration is closed")
-		} else {
-			jsonErr(w, 403, "registration is closed")
-		}
+	if !openRegistration && isGuest {
+		jsonErr(w, 403, "guest registration is closed")
 		return
 	}
 	if req.Tag == "" || len(req.Tag) > 120 {
@@ -413,9 +409,15 @@ func authRegisterHandler(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, "invalid new password")
 		return
 	}
-	needMail := mailEnabled() && !isGuest
+	// Ordinary accounts always require a delivered verification code, even if
+	// mail credentials are temporarily missing during a hosting migration.
+	needMail := !isGuest
 	if needMail && !validEmail(req.Email) {
 		jsonErr(w, 400, "email invalid")
+		return
+	}
+	if needMail && !mailEnabled() {
+		reportMailError(w, errMailDisabled)
 		return
 	}
 	if isGuest {
@@ -554,7 +556,7 @@ func authLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user.Anonymous = anonymousAccount(user)
-	if mailEnabled() && !user.Anonymous && user.Email != "" && user.EmailOk == 0 {
+	if !user.Anonymous && user.Email != "" && user.EmailOk == 0 {
 		sent, err := registrationMailCode(user)
 		if err != nil {
 			reportMailError(w, err)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -25,6 +26,7 @@ var (
 	errMailDisabled = errors.New("mail unavailable")
 	errMailCooldown = errors.New("wait a minute")
 	errMailDelivery = errors.New("mail send failed")
+	errMailInactive = errors.New("mail provider inactive")
 	errMailConflict = errors.New("email conflict")
 	mailCodeSender  = sendMailCode
 )
@@ -38,7 +40,7 @@ func mailEnabled() bool {
 }
 
 func validEmail(email string) bool {
-	if len(email) < 5 || len(email) > 120 || strings.Count(email, "@") != 1 || strings.ContainsAny(email, " \t\r\n") {
+	if len(email) < 5 || len(email) > 254 || strings.Count(email, "@") != 1 || strings.ContainsAny(email, " \t\r\n") {
 		return false
 	}
 	address, err := mail.ParseAddress(email)
@@ -90,9 +92,20 @@ func sendMailCode(email, code string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		log.Printf("MAIL: Brevo returned %d", resp.StatusCode)
+		var failure struct {
+			Message string `json:"message"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&failure) == nil && inactiveMailPlatform(failure.Message) {
+			return errMailInactive
+		}
 		return errMailDelivery
 	}
 	return nil
+}
+
+func inactiveMailPlatform(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "smtp account is not yet activated") || strings.Contains(lower, "sending platform is currently disabled")
 }
 
 func issueMailCode(email, uid, purpose string) error {
@@ -120,6 +133,9 @@ func issueMailCode(email, uid, purpose string) error {
 	if err := mailCodeSender(email, code); err != nil {
 		// Allow an immediate retry after a delivery failure.
 		db.Exec("DELETE FROM mail_codes WHERE email=? AND uid=? AND ts=? AND code=?", email, uid, now, code)
+		if errors.Is(err, errMailInactive) {
+			return errMailInactive
+		}
 		return errMailDelivery
 	}
 	return nil
@@ -127,7 +143,7 @@ func issueMailCode(email, uid, purpose string) error {
 
 func reportMailError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errMailDisabled), errors.Is(err, errMailDelivery):
+	case errors.Is(err, errMailDisabled), errors.Is(err, errMailDelivery), errors.Is(err, errMailInactive):
 		jsonErr(w, 503, err.Error())
 	case errors.Is(err, errMailCooldown):
 		jsonErr(w, 429, err.Error())
