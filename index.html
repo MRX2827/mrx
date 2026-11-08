@@ -18,47 +18,23 @@
     body{-webkit-user-select:none;user-select:none}
     *{-webkit-tap-highlight-color:transparent;-webkit-overflow-scrolling:touch}
     button{-webkit-user-select:none;user-select:none}
-    /* ── Mega smooth button animations ── */
+    /* Individual scale preserves a control's rotation/translation while pressing. */
     button, [role="button"], .tap-target {
       -webkit-tap-highlight-color: transparent;
       transform-origin: center;
-      transition:
-        transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
-        opacity   0.18s ease,
-        box-shadow 0.22s ease,
-        background 0.22s ease,
-        border-color 0.22s ease !important;
-      will-change: transform;
+      touch-action: manipulation;
+      transition: scale var(--mrx-motion-control, 360ms) var(--mrx-motion-out, cubic-bezier(.22,1.22,.38,1)),
+        transform var(--mrx-motion-control, 360ms) var(--mrx-motion-out, cubic-bezier(.22,1.22,.38,1)),
+        opacity 160ms ease, background-color 180ms ease, color 180ms ease, border-color 180ms ease !important;
     }
-    button:active, [role="button"]:active {
-      transform: scale(0.88) !important;
-      opacity: 0.78 !important;
-      transition:
-        transform 0.08s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-        opacity   0.08s ease !important;
+    button:active:not(:disabled), [role="button"]:active {
+      scale: .94;
+      transition-duration: 90ms !important;
     }
-    /* Round icon buttons — stronger press feel */
-    button[style*="border-radius:\"50%\""]:active,
-    button[style*="borderRadius:\"50%\""]:active {
-      transform: scale(0.82) !important;
-    }
-    /* Ripple layer on every tap */
-    button { position: relative; overflow: hidden; }
-    button::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      background: radial-gradient(circle at center, rgba(255,255,255,0.18) 0%, transparent 70%);
-      opacity: 0;
-      transform: scale(0);
-      transition: transform 0.4s ease, opacity 0.4s ease;
-      pointer-events: none;
-    }
-    button:active::after {
-      transform: scale(2.5);
-      opacity: 1;
-      transition: transform 0s, opacity 0s;
+    button:disabled { cursor: default; }
+    @media (prefers-reduced-motion: reduce) {
+      button, [role="button"], .tap-target { transition-duration: 1ms !important; }
+      button:active, [role="button"]:active { scale: 1; }
     }
     input::placeholder,textarea::placeholder{color:rgba(158,158,158,0.5)}
     ::-webkit-scrollbar{width:2px}
@@ -136,58 +112,6 @@
     };
     setTimeout(()=>window.__hideSplash?.(),4000);
 
-    // ── Global tap animation — fires on EVERY button/div touch ──────────────
-    function getAnimTarget(el){
-      let cur=el;
-      for(let i=0;i<5;i++){
-        if(!cur)return null;
-        const tag=cur.tagName;
-        // Только реальные кнопки — не div-ы со скроллом
-        if(tag==='BUTTON'||tag==='A')return cur;
-        cur=cur.parentElement;
-      }
-      return null;
-    }
-
-    document.addEventListener('touchstart', e=>{
-      const t=getAnimTarget(e.target);
-      if(!t)return;
-      t.style.transition='transform 0.08s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.08s ease,box-shadow 0.1s ease';
-      t.style.transform='scale(0.88)';
-      t.style.opacity='0.75';
-    },{passive:true});
-
-    document.addEventListener('touchend', e=>{
-      const t=getAnimTarget(e.target);
-      if(!t)return;
-      t.style.transition='transform 0.35s cubic-bezier(0.34,1.56,0.64,1),opacity 0.25s ease,box-shadow 0.25s ease';
-      t.style.transform='scale(1)';
-      t.style.opacity='1';
-    },{passive:true});
-
-    document.addEventListener('touchcancel', e=>{
-      const t=getAnimTarget(e.target);
-      if(!t)return;
-      t.style.transition='transform 0.2s ease,opacity 0.2s ease';
-      t.style.transform='scale(1)';
-      t.style.opacity='1';
-    },{passive:true});
-
-    // Mouse support (for desktop preview)
-    document.addEventListener('mousedown', e=>{
-      const t=getAnimTarget(e.target);
-      if(!t)return;
-      t.style.transition='transform 0.08s cubic-bezier(0.25,0.46,0.45,0.94),opacity 0.08s ease';
-      t.style.transform='scale(0.90)';
-      t.style.opacity='0.80';
-    });
-    document.addEventListener('mouseup', e=>{
-      const t=getAnimTarget(e.target);
-      if(!t)return;
-      t.style.transition='transform 0.3s cubic-bezier(0.34,1.56,0.64,1),opacity 0.2s ease';
-      t.style.transform='scale(1)';
-      t.style.opacity='1';
-    });
   </script>
 </body>
 </html>

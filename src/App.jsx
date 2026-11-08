@@ -9,6 +9,7 @@ import { chatLink, mrxLink, parseDeepLink } from "./deep-links.js";
 import { AccountSecurity } from "./account-security.jsx";
 import { AppUpdateHost } from "./app-update.jsx";
 import { checkForAppUpdate, hasAndroidUpdates } from "./app-update-bridge.js";
+import { MotionSurface, MotionPresence } from "./surface-motion.jsx";
 import "./motion.css";
 
 // ── ОТЛАДКА (не убирать до стабилизации): любое не пойманное JS-падение
@@ -2273,7 +2274,7 @@ function PromptHost(){
   const done=(v)=>{setVis(false);setTimeout(()=>{st.res(v);setSt(null);},200);};
   return(
     <div style={{position:"fixed",inset:0,zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",background:vis?"rgba(0,0,0,0.55)":"rgba(0,0,0,0)",transition:"background 0.2s ease",padding:24}} onClick={()=>done(null)}>
-      <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:320,background:theme.surface||"#1c1c1e",border:`1px solid ${theme.border||"#333"}`,borderRadius:18,padding:"20px 18px 14px",boxShadow:"0 18px 60px rgba(0,0,0,0.6)",transform:vis?"scale(1)":"scale(0.86)",opacity:vis?1:0,transition:"transform 0.22s cubic-bezier(0.34,1.56,0.64,1),opacity 0.18s ease"}}>
+      <MotionSurface open={vis} variant="dialog" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:320,background:theme.surface||"#1c1c1e",border:`1px solid ${theme.border||"#333"}`,borderRadius:18,padding:"20px 18px 14px",boxShadow:"0 18px 60px rgba(0,0,0,0.6)"}}>
         <div style={{color:theme.text||"#fff",fontSize:15,fontWeight:600,lineHeight:1.45,textAlign:"center",marginBottom:12}}>{st.msg}</div>
         <input ref={inputRef} value={val} onChange={e=>setVal(e.target.value)}
           onKeyDown={e=>{if(e.key==="Enter")done(val.trim()||st.defaultValue||null);}}
@@ -2282,7 +2283,7 @@ function PromptHost(){
           <button className="rmg-press" onClick={()=>done(null)} style={{flex:1,padding:"11px 0",borderRadius:12,border:`1px solid ${theme.border||"#333"}`,background:theme.surface2||"#2a2a2c",color:theme.text2||"#aaa",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Отмена</button>
           <button className="rmg-press" onClick={()=>done(val.trim()||st.defaultValue||null)} style={{flex:1,padding:"11px 0",borderRadius:12,border:"none",background:"#e53935",color:"#fff",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{st.okLabel}</button>
         </div>
-      </div>
+      </MotionSurface>
     </div>
   );
 }
@@ -2294,14 +2295,14 @@ function ConfirmHost(){
   if(!st)return null;
   const done=(v)=>{setVis(false);setTimeout(()=>{st.res(v);setSt(null);},200);};
   return(
-    <div style={{position:"fixed",inset:0,zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",background:vis?"rgba(0,0,0,0.55)":"rgba(0,0,0,0)",backdropFilter:vis?"blur(3px)":"none",transition:"background 0.2s ease,backdrop-filter 0.2s ease",padding:24}} onClick={()=>done(false)}>
-      <div onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:320,background:theme.surface||"#1c1c1e",border:`1px solid ${theme.border||"#333"}`,borderRadius:18,padding:"20px 18px 14px",boxShadow:"0 18px 60px rgba(0,0,0,0.6)",transform:vis?"scale(1)":"scale(0.86)",opacity:vis?1:0,transition:"transform 0.22s cubic-bezier(0.34,1.56,0.64,1),opacity 0.18s ease"}}>
+    <div style={{position:"fixed",inset:0,zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",background:vis?"rgba(0,0,0,0.55)":"rgba(0,0,0,0)",transition:"background 0.2s ease",padding:24}} onClick={()=>done(false)}>
+      <MotionSurface open={vis} variant="dialog" role="dialog" aria-modal="true" onClick={e=>e.stopPropagation()} style={{width:"100%",maxWidth:320,background:theme.surface||"#1c1c1e",border:`1px solid ${theme.border||"#333"}`,borderRadius:18,padding:"20px 18px 14px",boxShadow:"0 18px 60px rgba(0,0,0,0.6)"}}>
         <div style={{color:theme.text||"#fff",fontSize:15,fontWeight:600,lineHeight:1.45,textAlign:"center",marginBottom:16}}>{st.msg}</div>
         <div style={{display:"flex",gap:10}}>
           <button className="rmg-press" onClick={()=>done(false)} style={{flex:1,padding:"11px 0",borderRadius:12,border:`1px solid ${theme.border||"#333"}`,background:theme.surface2||"#2a2a2c",color:theme.text2||"#aaa",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>Отмена</button>
           <button className="rmg-press" onClick={()=>done(true)} style={{flex:1,padding:"11px 0",borderRadius:12,border:"none",background:"#e53935",color:"#fff",fontSize:14,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{st.okLabel}</button>
         </div>
-      </div>
+      </MotionSurface>
     </div>
   );
 }
@@ -3725,13 +3726,13 @@ function ReplyBar({msg,onCancel}){
     :msg.type==="file"?(msg.fileType?.startsWith("image/")?"🖼 Фото":"📎 "+(msg.fileName||"Файл"))
     :msg.text||"";
   return(
-    <div style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:surface2,borderLeft:`3px solid ${accent}`,margin:"0 0 6px"}}>
+    <MotionSurface variant="detail" style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",background:surface2,borderLeft:`3px solid ${accent}`,margin:"0 0 6px"}}>
       <div style={{flex:1,minWidth:0}}>
         <div style={{color:accent,fontSize:11,fontWeight:700,marginBottom:2}}>{msg.author}</div>
         <div style={{color:text2,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{preview}</div>
       </div>
       {onCancel&&<button onClick={onCancel} style={{background:"none",border:"none",color:text2,fontSize:18,cursor:"pointer",flexShrink:0}}>✕</button>}
-    </div>
+    </MotionSurface>
   );
 }
 
@@ -6157,7 +6158,7 @@ function MsgContextMenu({msg,myUid,chatId,onClose,onReply,onEdit,onForward,onSav
         padding:"0 0 32px",
         boxShadow:"0 -12px 40px rgba(0,0,0,0.6)",
         transform:visible?"translateY(0)":"translateY(100%)",
-        transition:"transform 0.32s cubic-bezier(0.32,0.72,0,1)",
+        transition:visible?"transform 560ms var(--mrx-motion-out)":"transform 280ms var(--mrx-motion-exit)",
         willChange:"transform",
       }} onClick={e=>e.stopPropagation()}>
         {/* Handle */}
@@ -6799,7 +6800,7 @@ function ToggleRow({label,desc,icon,value,onChange,surface2,border,text,text2}){
     }
   },[value]);
   return(
-    <div style={{display:"flex",alignItems:"center",gap:12,padding:"12px 15px",borderBottom:`1px solid ${border}`,cursor:"pointer"}}
+    <div role="switch" tabIndex={0} aria-checked={!!value} aria-label={label} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onChange();}}} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 15px",borderBottom:`1px solid ${border}`,cursor:"pointer"}}
       onClick={onChange}
       onTouchStart={e=>e.currentTarget.style.background=surface2}
       onTouchEnd={e=>e.currentTarget.style.background="transparent"}
@@ -7205,6 +7206,25 @@ function StoryArchiveSettings({currentUser,profile}){
   );
 }
 
+// Stable component identity lets switches and rows finish their springs on state updates.
+function SettingsRow({icon,Ic,tint,label,val,onClick,red=false,chevron=true}){
+  const {surface2,border,text,text2}=useContext(ThemeCtx);
+  return(
+    <div className="mrx-settings-row" role={onClick?"button":undefined} tabIndex={onClick?0:undefined}
+      onClick={onClick} onKeyDown={e=>{if(onClick&&(e.key==="Enter"||e.key===" ")){e.preventDefault();onClick();}}}
+      style={{"--row-pressed":surface2,display:"flex",alignItems:"center",gap:12,padding:"12px 15px",borderBottom:`1px solid ${border}`,cursor:onClick?"pointer":"default"}}>
+      {Ic
+        ?<div style={{width:30,height:30,borderRadius:8,background:tint||"#8e8e93",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Ic size={18} color="#fff"/></div>
+        :<div style={{fontSize:20,width:28,textAlign:"center",flexShrink:0}}>{icon}</div>}
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{color:red?"#ff5252":text,fontSize:14,fontWeight:500}}>{label}</div>
+        {val&&<div style={{color:text2,fontSize:12,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{val}</div>}
+      </div>
+      {onClick&&chevron&&<div style={{color:text2,fontSize:17,flexShrink:0}}>›</div>}
+    </div>
+  );
+}
+
 function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,onChangeWallpaper,accentId,onChangeAccent,msgFontSize=14,onChangeFontSize,onLogout,activeGroup,onOpenGroup,online=true,allChats=[]}){
   const {bg,surface,surface2,border,text,text2,accent}=useContext(ThemeCtx);
   const[s,setS2]=useState(()=>{try{return JSON.parse(localStorage.getItem("rmg_s")||"{}");}catch{return{};}});
@@ -7220,35 +7240,14 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
       syncPushPreferences(currentUser?.uid).catch(()=>{});
     }
   };
-  const T=({k,label,desc,icon})=>(
-    <ToggleRow label={label} desc={desc} icon={icon} value={isOn(k)} onChange={()=>toggle(k)}
-      surface2={surface2} border={border} text={text} text2={text2}/>
-  );
-  const Row=({icon,Ic,tint,label,val,onClick,red=false,chevron=true})=>(
-    <div onClick={onClick} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 15px",borderBottom:`1px solid ${border}`,cursor:onClick?"pointer":"default",transition:"background 0.13s, transform 0.13s"}}
-      onMouseEnter={e=>{if(onClick)e.currentTarget.style.background=surface2;}}
-      onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.transform="none";}}
-      onTouchStart={e=>{if(onClick){e.currentTarget.style.background=surface2;e.currentTarget.style.transform="scale(0.98)";}}}
-      onTouchEnd={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.transform="none";}}>
-      {Ic
-        ?<div style={{width:30,height:30,borderRadius:8,background:tint||"#8e8e93",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Ic size={18} color="#fff"/></div>
-        :<div style={{fontSize:20,width:28,textAlign:"center",flexShrink:0}}>{icon}</div>}
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{color:red?"#ff5252":text,fontSize:14,fontWeight:500}}>{label}</div>
-        {val&&<div style={{color:text2,fontSize:12,marginTop:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{val}</div>}
-      </div>
-      {onClick&&chevron&&<div style={{color:text2,fontSize:17,flexShrink:0}}>›</div>}
-    </div>
-  );
-
   // ── Открытая группа: «Уведомления» ────────────────────────────────────
   if(activeGroup==="notifications"){
     return(
       <div style={{background:surface,marginTop:8}}>
-        <T k="notifSound"   icon={<IcSetBell size={20} color="#8e8e93" style={_mi}/>} label="Звук уведомлений"     desc="Звук при новом сообщении"/>
-        <T k="notifVibro"   icon={<IcVibro size={20} color="#8e8e93" style={_mi}/>} label="Вибрация"              desc="Вибрация при новом сообщении"/>
-        <T k="notifPreview" icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Текст в уведомлении"  desc="Показывать текст сообщения в шторке"/>
-        <T k="notifGroups"  icon={<IcTabGroups size={20} color="#8e8e93" style={_mi}/>} label="Уведомления из групп" desc="Получать уведомления из групповых чатов"/>
+        <ToggleRow value={isOn("notifSound")} onChange={()=>toggle("notifSound")} surface2={surface2} border={border} text={text} text2={text2}   icon={<IcSetBell size={20} color="#8e8e93" style={_mi}/>} label="Звук уведомлений"     desc="Звук при новом сообщении"/>
+        <ToggleRow value={isOn("notifVibro")} onChange={()=>toggle("notifVibro")} surface2={surface2} border={border} text={text} text2={text2}   icon={<IcVibro size={20} color="#8e8e93" style={_mi}/>} label="Вибрация"              desc="Вибрация при новом сообщении"/>
+        <ToggleRow value={isOn("notifPreview")} onChange={()=>toggle("notifPreview")} surface2={surface2} border={border} text={text} text2={text2} icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Текст в уведомлении"  desc="Показывать текст сообщения в шторке"/>
+        <ToggleRow value={isOn("notifGroups")} onChange={()=>toggle("notifGroups")} surface2={surface2} border={border} text={text} text2={text2}  icon={<IcTabGroups size={20} color="#8e8e93" style={_mi}/>} label="Уведомления из групп" desc="Получать уведомления из групповых чатов"/>
         <div style={{padding:"13px 16px",borderTop:"1px solid rgba(128,128,128,.25)"}}>
           <div style={{color:text2,fontWeight:800,fontSize:14,marginBottom:6}}>📲 Уведомления на этом устройстве</div>
           <div style={{color:text2,fontSize:12,lineHeight:1.55}}>
@@ -7264,10 +7263,10 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
   if(activeGroup==="chats"){
     return(
       <div style={{background:surface,marginTop:8}}>
-        <T k="enterSend"  icon={<IcKeys size={20} color="#8e8e93" style={_mi}/>} label="Enter для отправки"   desc="Отправлять сообщение по нажатию Enter"/>
-        <T k="bubbleAnim" icon={<IcSpark size={20} color="#8e8e93" style={_mi}/>} label="Анимация сообщений"   desc="Плавное появление сообщений"/>
-        <Row Ic={IcTrash} tint="#e53935" label="Очистить кэш" onClick={()=>{localStorage.removeItem("rmg_cache");alert("Готово!");}}/>
-        <Row Ic={IcWrench} tint="#546e7a" label="Диагностика аватарок" onClick={async()=>{
+        <ToggleRow value={isOn("enterSend")} onChange={()=>toggle("enterSend")} surface2={surface2} border={border} text={text} text2={text2}  icon={<IcKeys size={20} color="#8e8e93" style={_mi}/>} label="Enter для отправки"   desc="Отправлять сообщение по нажатию Enter"/>
+        <ToggleRow value={isOn("bubbleAnim")} onChange={()=>toggle("bubbleAnim")} surface2={surface2} border={border} text={text} text2={text2} icon={<IcSpark size={20} color="#8e8e93" style={_mi}/>} label="Анимация сообщений"   desc="Плавное появление сообщений"/>
+        <SettingsRow Ic={IcTrash} tint="#e53935" label="Очистить кэш" onClick={()=>{localStorage.removeItem("rmg_cache");alert("Готово!");}}/>
+        <SettingsRow Ic={IcWrench} tint="#546e7a" label="Диагностика аватарок" onClick={async()=>{
           const L=["Сборка fix25"];
           const pv=v=>typeof v==="string"&&v?(v.startsWith("data:")?"OK data: длина="+v.length:"ССЫЛКА "+v.slice(0,42)+"… длина="+v.length):"ПУСТО";
           L.push("Сеть: "+(navigator.onLine?"есть":"НЕТ"));
@@ -7301,10 +7300,10 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
   if(activeGroup==="privacy"){
     return(
       <div style={{background:surface,marginTop:8}}>
-        <T k="showOnline"   icon={<IcDot size={20} color="#43a047" style={_mi}/>} label="Показывать онлайн"  desc="Другие видят когда ты в сети"/>
-        <T k="showLastSeen" icon={<IcSetClock size={20} color="#8e8e93" style={_mi}/>} label="Последний онлайн"   desc="Другие видят когда ты последний раз был в сети"/>
-        <T k="readReceipts" icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Статус прочтения"   desc="Собеседник видит что ты прочитал сообщение"/>
-        <T k="showTyping"   icon={<IcPencilSm size={20} color="#8e8e93" style={_mi}/>} label="Статус «печатает»" desc="Собеседник видит когда ты печатаешь"/>
+        <ToggleRow value={isOn("showOnline")} onChange={()=>toggle("showOnline")} surface2={surface2} border={border} text={text} text2={text2}   icon={<IcDot size={20} color="#43a047" style={_mi}/>} label="Показывать онлайн"  desc="Другие видят когда ты в сети"/>
+        <ToggleRow value={isOn("showLastSeen")} onChange={()=>toggle("showLastSeen")} surface2={surface2} border={border} text={text} text2={text2} icon={<IcSetClock size={20} color="#8e8e93" style={_mi}/>} label="Последний онлайн"   desc="Другие видят когда ты последний раз был в сети"/>
+        <ToggleRow value={isOn("readReceipts")} onChange={()=>toggle("readReceipts")} surface2={surface2} border={border} text={text} text2={text2} icon={<IcEye size={20} color="#8e8e93" style={_mi}/>} label="Статус прочтения"   desc="Собеседник видит что ты прочитал сообщение"/>
+        <ToggleRow value={isOn("showTyping")} onChange={()=>toggle("showTyping")} surface2={surface2} border={border} text={text} text2={text2}   icon={<IcPencilSm size={20} color="#8e8e93" style={_mi}/>} label="Статус «печатает»" desc="Собеседник видит когда ты печатаешь"/>
         <AccountSecurity key={currentUser?.uid} theme={{text,text2,surface2,border,accent}}/>
       </div>
     );
@@ -7392,7 +7391,7 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
             ))}
           </div>
         </div>
-        <T k="compactMode" icon={<IcRuler size={20} color="#8e8e93" style={_mi}/>} label="Компактный режим"/>
+        <ToggleRow value={isOn("compactMode")} onChange={()=>toggle("compactMode")} surface2={surface2} border={border} text={text} text2={text2} icon={<IcRuler size={20} color="#8e8e93" style={_mi}/>} label="Компактный режим"/>
       </div>
     );
   }
@@ -7455,21 +7454,21 @@ function SettingsBody({currentUser,profile,themeName,onChangeTheme,wallpaperId,o
         {["notifications","chats","privacy","storiesArchive","theme","about"].map(gid=>{
           const g=SETTINGS_GROUPS_META[gid];
           return(
-            <Row key={gid} icon={g.icon} Ic={g.Ic} tint={g.tint} label={g.label} val={g.subtitle} onClick={()=>onOpenGroup(gid)}/>
+            <SettingsRow key={gid} icon={g.icon} Ic={g.Ic} tint={g.tint} label={g.label} val={g.subtitle} onClick={()=>onOpenGroup(gid)}/>
           );
         })}
       </div>
       {hasAndroidUpdates()&&<div style={{background:surface,borderRadius:16,overflow:"hidden",marginBottom:12}}>
-        <Row icon="⬇" label="Проверить обновления" onClick={checkForAppUpdate}/>
+        <SettingsRow icon="⬇" label="Проверить обновления" onClick={checkForAppUpdate}/>
       </div>}
       {/* Выйти из аккаунта — отдельная кнопка, не группа */}
       <div style={{background:surface,marginTop:8}}>
-        <Row Ic={IcSetLogout} tint="#e53935" label="Выйти из аккаунта" red onClick={onLogout} chevron={false}/>
+        <SettingsRow Ic={IcSetLogout} tint="#e53935" label="Выйти из аккаунта" red onClick={onLogout} chevron={false}/>
       </div>
       {/* О мессенджере — открывается как полноценная группа настроек
           (тот же overlay, общий заголовок, общий обработчик «Назад»). */}
       <div style={{background:surface,marginTop:8,marginBottom:30}}>
-        <Row Ic={IcSetInfo} tint="#546e7a" label="О мессенджере" onClick={()=>onOpenGroup("about")}/>
+        <SettingsRow Ic={IcSetInfo} tint="#546e7a" label="О мессенджере" onClick={()=>onOpenGroup("about")}/>
       </div>
     </>
   );
@@ -9404,7 +9403,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             <button onClick={e=>{e.stopPropagation();setShowChatMenu(m=>!m);}} style={{width:36,height:36,borderRadius:"50%",background:surface2,border:`1px solid ${border}`,color:text2,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>⋮</button>
             {showChatMenu&&(<>
               <div style={{position:"fixed",inset:0,zIndex:199}} onClick={closeChatMenu}/>
-              <div style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)",animation:chatMenuClosing?"menuFadeQ 0.22s ease forwards":"menuPopQ var(--mrx-motion-control) var(--mrx-motion-out)"}} onClick={e=>e.stopPropagation()}>
+              <MotionSurface open={!chatMenuClosing} variant="menu" role="menu" style={{position:"absolute",top:42,right:0,background:surface,border:`1px solid ${border}`,borderRadius:14,zIndex:200,minWidth:190,boxShadow:"0 8px 30px rgba(0,0,0,0.6)"}} onClick={e=>e.stopPropagation()}>
                 {[
                   {ico:isMuted?<IcSetBell size={18} color="#8e8e93" style={_mi}/>:<IcMute size={18} color="#8e8e93" style={_mi}/>,lbl:isMuted?"Включить звук":"Выключить звук",fn:()=>{const m=!isMuted;setIsMuted(m);setS("mute_"+chat.id,m);closeChatMenu();}},
                   ...(!isGroup&&!isChannel?[{ico:<IcLink size={18} color="#8e8e93"/>,lbl:"Ссылка и QR-код",fn:()=>{closeChatMenu();setShowChatInfo(true);}}]:[]),
@@ -9420,7 +9419,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                     <span>{item.ico}</span><span>{item.lbl}</span>
                   </button>
                 ))}
-              </div>
+              </MotionSurface>
               </>
             )}
           </div>
@@ -9549,7 +9548,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
           <div ref={imeDockRef} data-rmg-dock="" style={{position:"absolute",left:0,right:0,bottom:0,zIndex:120}}>
           {/* Attach panel */}
         {attachMounted&&!showEmoji&&(
-          <div style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)",animation:attachClosing?"slideDown 0.2s ease forwards":"slideUp 0.2s ease"}} onClick={e=>e.stopPropagation()}>
+          <MotionSurface open={!attachClosing} variant="attachment" className="mrx-attachment" style={{background:surface,border:`1px solid ${border}`,borderRadius:"18px 18px 0 0",padding:"14px 12px",boxShadow:"0 -6px 24px rgba(0,0,0,0.3)"}} onClick={e=>e.stopPropagation()}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:9}}>
               {[{ico:<IcImage size={24} color={accent} style={_mi}/>,lbl:"Галерея",fn:()=>{if(galleryRef.current){galleryRef.current.click();}}},{ico:<IcFileDoc size={24} color="#f4a231" style={_mi}/>,lbl:"Файл",fn:()=>fileRef.current?.click()},{ico:<IcMusic size={24} color="#9c27b0" style={_mi}/>,lbl:"Музыка",fn:()=>fileRef.current?.click()}].map(b=>(
                 <button key={b.lbl} onClick={e=>{e.stopPropagation();b.fn();setShowAttach(false);}} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5,padding:"11px 6px",background:surface2,border:`1px solid ${border}`,borderRadius:14,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}} onMouseEnter={e=>e.currentTarget.style.background=accent+"22"} onMouseLeave={e=>e.currentTarget.style.background=surface2}>
@@ -9558,11 +9557,11 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                 </button>
               ))}
             </div>
-          </div>
+          </MotionSurface>
         )}
           <div className="mrx-composer" style={{"--composer-bg":surface,"--composer-card":surface2,"--composer-line":border,"--composer-text":text,"--composer-muted":text2,"--composer-accent":accent,"--composer-on-accent":contrastOn(accent)}} onClick={e=>e.stopPropagation()}>
             {online&&editMsg&&(
-              <div style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:surface2,borderLeft:`3px solid ${accent}`,marginBottom:4}}>
+              <div className="mrx-detail-enter" style={{display:"flex",alignItems:"center",gap:10,padding:"7px 12px",background:surface2,borderLeft:`3px solid ${accent}`,marginBottom:4}}>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{color:accent,fontSize:11,fontWeight:700}}>✏️ Редактирование</div>
                   <div style={{color:text2,fontSize:12,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{editMsg.text}</div>
@@ -9862,8 +9861,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
   // Только ChatList пользуется этим ref'ом, поэтому конфликт регистрации невозможен.
   useEffect(()=>{
     if(!showSettingsTab){
-      // overlay закрыт — сбрасываем активную группу (на случай быстрого переключения табов)
-      if(settingsGroup)setSettingsGroup(null);
+      // Содержимое сохраняется до конца exit-анимации (onExited).
       _settingsBackHandler=null;
       return;
     }
@@ -10249,8 +10247,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
           Telegram-style навигация: главная страница — список групп; тап на группу
           открывает её экран. Кнопка ← в шапке и физический Back делают одно и то же:
           если открыта группа — возвращают на главную; иначе — закрывают весь overlay. */}
-      {showSettingsTab&&(
-        <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:bg,overflowY:"auto",paddingBottom:72,animation:"pageSlideIn var(--mrx-motion-surface) var(--mrx-motion-out)"}}>
+      <MotionPresence open={showSettingsTab} onExited={()=>setSettingsGroup(null)} variant="page" aria-label="Настройки" style={{position:"absolute",top:0,left:0,right:0,bottom:0,zIndex:50,background:bg,overflowY:"auto",paddingBottom:72}}>
           {/* Заголовок настроек — динамический по settingsGroup */}
           <div style={{position:"sticky",top:0,zIndex:5,paddingTop:online?"max(env(safe-area-inset-top,28px),28px)":9,paddingLeft:15,paddingRight:15,paddingBottom:13,background:surface,borderBottom:`1px solid ${border}`,display:"flex",alignItems:"center",gap:13,flexShrink:0,backdropFilter:"blur(18px)",WebkitBackdropFilter:"blur(18px)"}}>
             <button onClick={()=>{
@@ -10296,8 +10293,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
             allChats={chats}
           />
           </div>
-        </div>
-      )}
+        </MotionPresence>
 
       <div style={{flex:1,overflow:"hidden",position:"relative"}}
         onTouchStart={e=>{
@@ -10332,7 +10328,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
         <div style={{
           display:"flex",height:"100%",
           transform:`translateX(calc(${-tabIdx*100}% + ${swipeOffset}%))`,
-          transition:isSwiping?"none":"transform 0.32s var(--mrx-motion-out)"
+          transition:isSwiping?"none":"transform 460ms var(--mrx-motion-out)"
         }}>
           {TABS.map((tabDef,ti)=>{
             if(tabDef.id==="contacts"){
@@ -10380,7 +10376,8 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
                   const myUnread=c.unreadBy?.[currentUser.uid]||0;
                   const isNew=myUnread>0;
                   return(
-                    <div key={c.id}
+                    <div key={c.id} className="mrx-chat-row" role="button" tabIndex={0}
+                      onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onOpen({...c,name});}}}
                       onClick={()=>onOpen({...c,name})}
                       onContextMenu={e=>{e.preventDefault();openCtx(c,e);}}
                       onTouchStart={e=>{
@@ -10402,7 +10399,7 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
                             :(c.photo||c._partnerPhoto||null)
                         }/>
                         {isNew&&(
-                          <div style={{
+                          <div key={myUnread} className="mrx-unread-badge" style={{
                             position:"absolute",bottom:-2,right:-2,minWidth:19,height:19,
                             borderRadius:10,background:accent,
                             display:"flex",alignItems:"center",justifyContent:"center",
@@ -10434,10 +10431,10 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
       </div>
       {/* FAB dropdown */}
       {(fab||fabClosing)&&(
-        <div style={{position:"fixed",bottom:86,right:18,zIndex:200,display:"flex",flexDirection:"column",gap:9,animation:fabClosing?"fabFadeQ 0.2s ease forwards":"fabPopQ 0.26s cubic-bezier(0.22,1,0.36,1)"}}>
+        <MotionSurface open={!fabClosing} variant="menu" className="mrx-action-stack" style={{position:"fixed",bottom:86,right:18,zIndex:200,display:"flex",flexDirection:"column",gap:9}}>
           <button onClick={()=>{closeFab();setCreating("channel");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabChannels size={17} color={accent}/><span>Создать канал</span></button>
           <button onClick={()=>{closeFab();setCreating("group");}} style={{display:"flex",alignItems:"center",gap:9,padding:"10px 18px",background:surface,border:`1px solid ${border}`,borderRadius:18,color:text,fontSize:13,cursor:"pointer",fontFamily:"inherit",boxShadow:"0 4px 20px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}><IcTabGroups size={17} color={accent}/><span>Создать группу</span></button>
-        </div>
+        </MotionSurface>
       )}
 
       {/* ── Bottom Navigation Bar ── */}
@@ -10467,11 +10464,11 @@ function ChatList({currentUser,profile,onOpen,onFind,onViewProfile,onChatsLoad,
                 style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",
                   gap:3,background:"none",border:"none",cursor:"pointer",padding:"4px 2px",
                   fontFamily:"inherit"}}>
-                <div style={{lineHeight:0,
+                <div className="mrx-nav-icon" data-active={isActive} style={{lineHeight:0,
                   color:isActive?accent:text2,
                   opacity:isActive?1:0.55,
                   transition:"transform var(--mrx-motion-control) var(--mrx-motion-out), opacity var(--mrx-motion-press), color var(--mrx-motion-press)",
-                  transform:isActive?"scale(1.12) translateY(-1px)":"scale(1)"
+                  transform:isActive?"scale(1.12) translateY(-2px)":"scale(1)"
                 }}>{t.Ic?<t.Ic size={23}/>:<span style={{fontSize:22}}>{t.icon}</span>}</div>
                 <div style={{fontSize:10,color:isActive?accent:text2,fontWeight:isActive?700:400,transition:"color 0.2s"}}>{t.label}</div>
               </button>
@@ -11069,8 +11066,8 @@ function AppInner(){
     #root{height:100%;width:100%}
     ::-webkit-scrollbar{width:2px}::-webkit-scrollbar-thumb{background:${theme.border};border-radius:4px}
     .rmg-audio-btn{transition:transform var(--mrx-motion-press) var(--mrx-motion-out),opacity var(--mrx-motion-press),background 0.2s,color 0.2s}
-    .rmg-audio-btn:active{transform:scale(0.82);opacity:0.7}
-    .rmg-audio-btn-lg:active{transform:scale(0.9)}
+    .rmg-audio-btn:active{scale:.94}
+    .rmg-audio-btn-lg:active{scale:.96}
     .rmg-audio-toggle{transition:transform 0.25s cubic-bezier(.34,1.56,.64,1),background 0.2s,color 0.2s}
     .rmg-audio-toggle.on{animation:rmgTogglePop 0.32s cubic-bezier(.34,1.56,.64,1)}
     @keyframes rmgTogglePop{0%{transform:scale(1)}45%{transform:scale(1.22)}100%{transform:scale(1)}}
@@ -11139,7 +11136,7 @@ function AppInner(){
     input::placeholder,textarea::placeholder{color:${theme.text2}55}
     button{-webkit-user-select:none;user-select:none}
     .rmg-press{transition:transform var(--mrx-motion-control) var(--mrx-motion-out),opacity var(--mrx-motion-press)}
-    .rmg-press:active{transform:scale(.94);opacity:.82;transition-duration:var(--mrx-motion-press)}
+    .rmg-press:active{scale:.94;transition-duration:var(--mrx-motion-press)}
     .rmg-skel{background:linear-gradient(90deg,rgba(128,128,128,0.14) 25%,rgba(128,128,128,0.3) 50%,rgba(128,128,128,0.14) 75%);background-size:200% 100%;animation:skelShimmer 1.15s linear infinite}
     @keyframes skelShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
     /* Плавная клавиатура: на время движения IME отключаем дорогой backdrop-filter

@@ -109,7 +109,7 @@ export function AccountSecurity({ theme }) {
       {account && !account.mailEnabled && (mode === "email" || account.pendingEmail) && (
         <p style={{ color: text2, fontSize: 12, lineHeight: 1.45 }}>Отправка писем сейчас недоступна. Новый адрес можно сохранить, а использовать для входа и восстановления — после подтверждения.</p>
       )}
-      {mode && <form key={mode} onSubmit={submit} style={{ display: "grid", gap: 10 }}>
+      {mode && <form className="mrx-detail-enter" key={mode} onSubmit={submit} style={{ display: "grid", gap: 10 }}>
         {mode === "confirm" ? (
           <label style={{ display: "grid", gap: 5 }}>Код из письма
             <input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required style={field}/>
@@ -129,7 +129,7 @@ export function AccountSecurity({ theme }) {
           <button type="button" disabled={busy} style={button} onClick={() => show("")}>Отмена</button>
         </div>
       </form>}
-      {result && <p role={result.error ? "alert" : "status"} style={{ color: result.error ? "#ff7979" : text2, lineHeight: 1.45 }}>{result.text}</p>}
+      {result && <p className="mrx-detail-enter" role={result.error ? "alert" : "status"} style={{ color: result.error ? "#ff7979" : text2, lineHeight: 1.45 }}>{result.text}</p>}
     </section>
   );
 }

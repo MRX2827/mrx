@@ -1,8 +1,8 @@
 :root {
   --mrx-motion-out: cubic-bezier(.22, 1.22, .38, 1);
   --mrx-motion-exit: cubic-bezier(.4, 0, .65, 1);
-  --mrx-motion-surface: 340ms;
-  --mrx-motion-control: 260ms;
+  --mrx-motion-surface: 480ms;
+  --mrx-motion-control: 380ms;
   --mrx-motion-message: 400ms;
   --mrx-motion-send: 950ms;
   --mrx-motion-message-ease: cubic-bezier(.22, 1, .36, 1);
@@ -288,7 +288,7 @@
   overflow: auto;
   overscroll-behavior: contain;
   touch-action: pan-y;
-  animation: mrx-emoji-tab-in 190ms var(--mrx-motion-message-ease) both;
+  animation: mrx-emoji-tab-in 320ms var(--mrx-motion-out) both;
 }
 
 .mrx-emoji-grid[data-stickers="true"] {
@@ -314,7 +314,7 @@
 .mrx-emoji-item:active,
 .mrx-emoji-category:active,
 .mrx-emoji-actions button:active,
-.mrx-compose-button:active { transform: scale(.9); }
+.mrx-compose-button:active { scale: .94; }
 
 .mrx-emoji-item img,
 .mrx-emoji-category img {
@@ -444,7 +444,7 @@
   border: 1px solid var(--pack-border);
   color: var(--pack-text);
   background: var(--pack-surface);
-  animation: mrx-pack-enter var(--mrx-motion-surface) cubic-bezier(.2,.8,.26,1) both;
+  animation: mrx-pack-enter var(--mrx-motion-surface) var(--mrx-motion-out) both;
 }
 
 @keyframes mrx-pack-enter {
@@ -520,3 +520,82 @@
 }
 .mrx-chat-sticker img { width: min(145px, 45vw); aspect-ratio: 1; object-fit: contain; }
 .mrx-sticker-link { font: inherit; text-decoration: underline; }
+
+/* Springs live on small, explicit surfaces. Message arrival keyframes stay separate. */
+[data-motion-surface="menu"] { transform-origin: top right; }
+[data-motion-surface="attachment"] { transform-origin: bottom center; }
+
+.mrx-detail-enter {
+  animation: mrx-detail-enter var(--mrx-motion-surface) var(--mrx-motion-out) both;
+}
+
+@keyframes mrx-detail-enter {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.mrx-action-stack > button > svg,
+.mrx-attachment button > span:first-child {
+  animation: mrx-action-icon 520ms var(--mrx-motion-out) backwards;
+}
+.mrx-action-stack > button:nth-child(2) > svg,
+.mrx-attachment button:nth-child(2) > span:first-child { animation-delay: 35ms; }
+.mrx-attachment button:nth-child(3) > span:first-child { animation-delay: 70ms; }
+
+@keyframes mrx-action-icon {
+  from { opacity: 0; transform: translate3d(0, 8px, 0) scale(.78); }
+  to { opacity: 1; transform: none; }
+}
+
+.mrx-nav-icon[data-active="true"] > svg {
+  animation: mrx-nav-select 500ms var(--mrx-motion-out) both;
+}
+@keyframes mrx-nav-select {
+  from { transform: scale(.82) rotate(-5deg); }
+  to { transform: none; }
+}
+
+.mrx-unread-badge {
+  animation: mrx-badge-pop 480ms var(--mrx-motion-out) both;
+}
+@keyframes mrx-badge-pop {
+  from { opacity: .3; transform: scale(.72); }
+  to { opacity: 1; transform: none; }
+}
+
+.rmg-toggle-thumb {
+  transition: transform var(--mrx-motion-surface) var(--mrx-motion-out),
+    scale var(--mrx-motion-control) var(--mrx-motion-out);
+}
+.rmg-toggle:active .rmg-toggle-thumb { scale: .91 1.06; }
+
+/* No permanently promoted layer on every control; the browser promotes moving surfaces. */
+@media (prefers-reduced-motion: reduce) {
+  .mrx-detail-enter,
+  .mrx-action-stack > button > svg,
+  .mrx-attachment button > span:first-child,
+  .mrx-nav-icon[data-active="true"] > svg,
+  .mrx-unread-badge { animation: none; }
+  .rmg-toggle:active .rmg-toggle-thumb { scale: 1; }
+}
+
+.mrx-settings-row > div:first-child {
+  animation: mrx-action-icon 480ms var(--mrx-motion-out) backwards;
+}
+.mrx-settings-row:nth-child(2) > div:first-child { animation-delay: 18ms; }
+.mrx-settings-row:nth-child(3) > div:first-child { animation-delay: 36ms; }
+.mrx-settings-row:nth-child(4) > div:first-child { animation-delay: 54ms; }
+.mrx-settings-row:nth-child(5) > div:first-child { animation-delay: 72ms; }
+.mrx-settings-row:nth-child(n+6) > div:first-child { animation-delay: 90ms; }
+.mrx-settings-row:active { background-color: var(--row-pressed); scale: .985; }
+@media (hover: hover) {
+  .mrx-settings-row:hover { background-color: var(--row-pressed); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mrx-settings-row > div:first-child { animation: none; }
+  .mrx-settings-row:active { scale: 1; }
+}
+.mrx-chat-row:active { scale: .985; }
+@media (prefers-reduced-motion: reduce) {
+  .mrx-chat-row:active { scale: 1; }
+}
