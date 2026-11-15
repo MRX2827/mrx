@@ -9210,11 +9210,30 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   const[fwdTarget,setFwdTarget]=useState(null); // выбранный чат для пересылки (шаг подтверждения)
   const[fwdBusy,setFwdBusy]=useState(false);
   const[voiceHolding,setVoiceHolding]=useState(false);
-  const[quickMode,setQuickMode]=useState("voice");
+  const[quickMode,setQuickMode]=useState(()=>{try{return localStorage.getItem("mrx_quick_mode")==="circle"?"circle":"voice";}catch(e){return "voice";}});
   const[circleFs,setCircleFs]=useState(null); // fullscreen circle src
   const[lightbox,setLightbox]=useState(null);
   const[facingMode,setFacingMode]=useState("user");
   const circlePreviewRef=useRef(null);
+  const[circleExit,setCircleExit]=useState(null); // "send" | "cancel": кружок плавно уходит после записи
+  const[circleSnap,setCircleSnap]=useState(null); // последний кадр, пока идёт анимация закрытия
+  const[circleFsClosing,setCircleFsClosing]=useState(false);
+  const circleExitTimer=useRef(null);
+  const closeCircleFs=()=>{setCircleFsClosing(true);setTimeout(()=>{setCircleFs(null);setCircleFsClosing(false);},240);};
+  const snapCircle=()=>{
+    try{
+      const v=circlePreviewRef.current;if(!v||!v.videoWidth)return;
+      const c=document.createElement("canvas");c.width=c.height=240;
+      const x=c.getContext("2d");const sz=Math.min(v.videoWidth,v.videoHeight);
+      if(facingMode==="user"){x.translate(240,0);x.scale(-1,1);}
+      x.drawImage(v,(v.videoWidth-sz)/2,(v.videoHeight-sz)/2,sz,sz,0,0,240,240);
+      setCircleSnap(c.toDataURL("image/jpeg",0.6));
+    }catch(e){}
+  };
+  const finishCircleUi=(kind)=>{
+    clearTimeout(circleExitTimer.current);setCircleExit(kind);
+    circleExitTimer.current=setTimeout(()=>{setCircleExit(null);setCircleSnap(null);},kind==="send"?460:320);
+  };
 
   // Устанавливаем srcObject один раз когда stream появляется — без мерцания
   useEffect(()=>{
@@ -9246,19 +9265,22 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         circlePreviewRef.current.play().catch(()=>{});
       }
       const mimeType=MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")?"video/webm;codecs=vp9,opus":MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")?"video/webm;codecs=vp8,opus":"video/webm";
+      const startedAt=Date.now();
       const mr=new MediaRecorder(stream,{mimeType,videoBitsPerSecond:4200000,audioBitsPerSecond:192000});mediaRef.current=mr;chunksRef.current=[];
       mr.ondataavailable=e=>{if(e.data.size>0)chunksRef.current.push(e.data);};
       mr.onstop=async()=>{
         stream.getTracks().forEach(t=>t.stop());setCircleStream(null);
         const blob=new Blob(chunksRef.current,{type:mimeType});
+        const durSec=Math.max(1,Math.round((Date.now()-startedAt)/1000));
+        const dur=`${Math.floor(durSec/60)}:${String(durSec%60).padStart(2,"0")}`;
         const localId="local_circle_"+Date.now();
         const localUrl=URL.createObjectURL(blob);
         try{
           const circleFile=new File([blob],`circle_${Date.now()}.webm`,{type:mimeType});
           const videoThumb=await createVideoPoster(circleFile);
-          addLocalSending({id:localId,author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoUrl:localUrl,...(videoThumb?{videoThumb}:{}),time:timeNow(),createdAt:{toDate:()=>new Date(),seconds:Date.now()/1000},_pending:true,_uploading:true,_uploadPct:8});
+          addLocalSending({id:localId,author:profile?.name||currentUser.displayName||"?",uid:currentUser.uid,type:"circle",duration:`${dur}`,videoUrl:localUrl,...(videoThumb?{videoThumb}:{}),time:timeNow(),createdAt:{toDate:()=>new Date(),seconds:Date.now()/1000},_pending:true,_uploading:true,_uploadPct:8});
           const videoUrl=await serverUpload(circleFile,pct=>updateLocalSending(localId,{_uploadPct:pct||8}));
-          sendMsg({type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoUrl,...(videoThumb?{videoThumb}:{} ),_replaceLocalId:localId,_quietAnim:true,_localPreview:{videoUrl:localUrl}});
+          sendMsg({type:"circle",duration:`${dur}`,videoUrl,...(videoThumb?{videoThumb}:{} ),_replaceLocalId:localId,_quietAnim:true,_localPreview:{videoUrl:localUrl}});
           playSound("sent");
         }catch(err){
           // Fallback: base64 (только для совсем маленьких кружков)
@@ -9266,7 +9288,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
             const reader=new FileReader();
             await new Promise(res=>{reader.onloadend=res;reader.readAsDataURL(blob);});
             removeLocalSending(localId);
-            sendMsg({type:"circle",duration:`0:${String(recSec).padStart(2,"0")}`,videoData:reader.result});
+            sendMsg({type:"circle",duration:`${dur}`,videoData:reader.result});
             playSound("sent");
           }catch(e2){
             removeLocalSending(localId);
@@ -9275,18 +9297,26 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         }
         setTimeout(()=>URL.revokeObjectURL(localUrl),60000);
       };
+      clearTimeout(circleExitTimer.current);setCircleExit(null);setCircleSnap(null);
       mr.start(1000);setRecCircle(true);setRecSec(0);
       timerRef.current=setInterval(()=>setRecSec(s=>s+1),1000);
-      setTimeout(()=>{if(mr.state==="recording"){mr.stop();setRecCircle(false);setRecSec(0);clearInterval(timerRef.current);}},120000);
+      setTimeout(()=>{if(mr.state==="recording")stopCircle();},120000);
     }catch(e){alert("Нет доступа к камере: "+e.message);}
   };
-  const stopCircle=()=>{if(mediaRef.current?.state==="recording")mediaRef.current.stop();setRecCircle(false);setRecSec(0);clearInterval(timerRef.current);};
-  const cancelCircle=()=>{
+  const stopCircle=()=>{
+    if(mediaRef.current?.state==="recording"){
+      snapCircle();if(navigator.vibrate)navigator.vibrate(12);
+      mediaRef.current.stop();finishCircleUi("send");
+    }
+    setRecCircle(false);setRecSec(0);clearInterval(timerRef.current);
+  };
+  const cancelCircle=(animate)=>{
+    if(animate!==false&&recCircle){snapCircle();finishCircleUi("cancel");}
     if(mediaRef.current?.state==="recording"){mediaRef.current.ondataavailable=null;mediaRef.current.onstop=null;mediaRef.current.stop();}try{voiceStreamRef.current?.getTracks().forEach(t=>t.stop());}catch(e2){}voiceStreamRef.current=null;
     circleStream?.getTracks().forEach(t=>t.stop());setCircleStream(null);
     setRecCircle(false);setRecSec(0);clearInterval(timerRef.current);chunksRef.current=[];
   };
-  const flipCamera=()=>{cancelCircle();setTimeout(()=>startCircle(facingMode==="user"?"environment":"user"),300);};
+  const flipCamera=()=>{cancelCircle(false);setTimeout(()=>startCircle(facingMode==="user"?"environment":"user"),300);};
   const startQuickRecord=()=>quickMode==="voice"?startVoice():startCircle("user");
 
   if(!chatData)return null;
@@ -9333,7 +9363,7 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
   useEffect(()=>{
     _chatBackHandler=()=>{
       if(lightbox){setLightbox(null);return true;}
-      if(circleFs){setCircleFs(null);return true;}
+      if(circleFs){closeCircleFs();return true;}
       if(showChatInfo||showChatSettings){window.dispatchEvent(new Event("rmg-chat-modal-close"));return true;}
       if(showAddMembers){setShowAddMembers(false);return true;}
       if(showMembers){setShowMembers(false);return true;}
@@ -9501,28 +9531,33 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         )}
 
         {/* Circle recording overlay */}
-        {recCircle&&(
-          <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.93)",zIndex:400,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:20}}>
-            <div style={{position:"relative",width:240,height:240}}>
-              <div style={{position:"absolute",top:0,left:0,right:0,bottom:0,borderRadius:"50%",overflow:"hidden",border:`4px solid ${accent}`,boxShadow:`0 0 60px ${accent}66`}}>
+        {(recCircle||circleExit)&&(()=>{
+          const out=!recCircle&&circleExit;
+          const R=114,C=2*Math.PI*R;
+          return(
+          <div className="mrx-circle-rec" data-state={out?"out-"+circleExit:"in"}>
+            <div className="mrx-circle-rec__stage">
+              <div style={{position:"absolute",inset:0,borderRadius:"50%",overflow:"hidden",border:`4px solid ${accent}`,boxShadow:`0 0 60px ${accent}66`,background:"#000"}}>
                 <video ref={circlePreviewRef}
                   autoPlay muted playsInline style={{width:"100%",height:"100%",objectFit:"cover",transform:facingMode==="user"?"scaleX(-1)":"none"}}/>
+                {out&&circleSnap&&<img src={circleSnap} alt="" style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover"}}/>}
               </div>
               <svg width={240} height={240} style={{position:"absolute",top:0,left:0,transform:"rotate(-90deg)",pointerEvents:"none"}}>
-                <circle cx={120} cy={120} r={114} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth={4}/>
-                <circle cx={120} cy={120} r={114} fill="none" stroke={accent} strokeWidth={4}
-                  strokeDasharray={2*Math.PI*114} strokeDashoffset={2*Math.PI*114*(1-recSec/60)}
+                <circle cx={120} cy={120} r={R} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth={4}/>
+                <circle cx={120} cy={120} r={R} fill="none" stroke={accent} strokeWidth={4}
+                  strokeDasharray={C} strokeDashoffset={C*(1-Math.min(recSec/120,1))}
                   strokeLinecap="round" style={{transition:"stroke-dashoffset 1s linear"}}/>
               </svg>
-              <div style={{position:"absolute",bottom:8,left:"50%",transform:"translateX(-50%)",background:"rgba(0,0,0,0.7)",borderRadius:20,padding:"3px 12px",color:"#fff",fontSize:13,fontWeight:700}}>● {recSec}с</div>
-              <button onClick={flipCamera} style={{position:"absolute",top:8,right:8,width:34,height:34,borderRadius:"50%",background:"rgba(0,0,0,0.6)",border:"1px solid rgba(255,255,255,0.3)",color:"#fff",fontSize:15,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>🔄</button>
+              <div className="mrx-circle-rec__timer"><i className="mrx-circle-rec__dot"/>{Math.floor(recSec/60)}:{String(recSec%60).padStart(2,"0")}</div>
+              <button onClick={flipCamera} aria-label="Сменить камеру" style={{position:"absolute",top:8,right:8,width:34,height:34,borderRadius:"50%",background:"rgba(0,0,0,0.6)",border:"1px solid rgba(255,255,255,0.3)",color:"#fff",fontSize:15,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>🔄</button>
             </div>
-            <div style={{display:"flex",gap:12}}>
+            <div className="mrx-circle-rec__actions">
               <button onClick={stopCircle} style={{padding:"13px 32px",background:`linear-gradient(135deg,${accent},${accent2})`,border:"none",borderRadius:22,color:"#fff",fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>✓ Отправить</button>
-              <button onClick={cancelCircle} style={{padding:"13px 20px",background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:22,color:"#fff",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>✕ Отмена</button>
+              <button onClick={()=>cancelCircle()} style={{padding:"13px 20px",background:"rgba(255,255,255,0.1)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:22,color:"#fff",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>✕ Отмена</button>
             </div>
           </div>
-        )}
+          );
+        })()}
 
 
         {canWrite&&<EmojiPanel open={showEmoji} dockRef={imeDockRef} packs={stickerPacks}
@@ -9649,9 +9684,9 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
                         onMouseUp={()=>{clearTimeout(lpVoiceRef.current);setVoiceHolding(false);}}
                         onTouchStart={e=>{e.preventDefault();quickRecordStartedRef.current=false;setVoiceHolding(true);lpVoiceRef.current=setTimeout(()=>{quickRecordStartedRef.current=true;if(navigator.vibrate)navigator.vibrate(40);startQuickRecord();setVoiceHolding(false);},400);}}
                         onTouchEnd={()=>{clearTimeout(lpVoiceRef.current);setVoiceHolding(false);}}
-                        onClick={e=>{e.stopPropagation();if(quickRecordStartedRef.current){quickRecordStartedRef.current=false;return;}setQuickMode(m=>m==="voice"?"circle":"voice");}}
+                        onClick={e=>{e.stopPropagation();if(quickRecordStartedRef.current){quickRecordStartedRef.current=false;return;}if(navigator.vibrate)navigator.vibrate(8);setQuickMode(m=>{const n=m==="voice"?"circle":"voice";try{localStorage.setItem("mrx_quick_mode",n);}catch(e){}return n;});}}
                         className="mrx-compose-button" aria-label={quickMode==="voice"?"Голосовое сообщение":"Видеосообщение"}
-                        data-holding={voiceHolding}>{quickMode==="voice"?<IcMic size={18}/>:<IcCircleOutline size={18}/>}</button>
+                        data-holding={voiceHolding}><span key={quickMode} className="mrx-quick-icon">{quickMode==="voice"?<IcMic size={18}/>:<IcCircleVid size={18}/>}</span></button>
                     </div>
                   </div>
                 )}
@@ -9677,12 +9712,12 @@ function ChatScreen({isActive=true,chat,currentUser,profile,onBack,onViewProfile
         {lightbox&&<Lightbox src={lightbox.src} fileName={lightbox.fileName} fileType={lightbox.fileType} originRect={lightbox.originRect} onClose={()=>setLightbox(null)}/> }
         {/* Circle fullscreen - renders above everything, messages hidden */}
         {circleFs&&(
-          <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.97)",zIndex:3000,display:"flex",alignItems:"center",justifyContent:"center",animation:"circleExpandIn 0.35s cubic-bezier(0.34,1.56,0.64,1)"}} onClick={()=>setCircleFs(null)}>
-            <div style={{position:"relative",width:"min(88vw,88vh)",height:"min(88vw,88vh)"}}>
+          <div className="mrx-circle-fs" data-state={circleFsClosing?"out":"in"} onClick={closeCircleFs}>
+            <div className="mrx-circle-fs__disc" onClick={e=>e.stopPropagation()}>
               <div style={{position:"absolute",inset:0,borderRadius:"50%",overflow:"hidden",border:`4px solid ${accent}`,boxShadow:`0 0 80px ${accent}55,0 20px 80px rgba(0,0,0,0.9)`}}>
                 <video src={circleFs} controls autoPlay playsInline style={{width:"100%",height:"100%",objectFit:"cover"}}/>
               </div>
-              <button onClick={()=>setCircleFs(null)} style={{position:"absolute",top:-10,right:-10,width:36,height:36,borderRadius:"50%",background:"rgba(0,0,0,0.75)",border:"1.5px solid rgba(255,255,255,0.25)",color:"#fff",fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(8px)"}}>✕</button>
+              <button onClick={closeCircleFs} aria-label="Закрыть" style={{position:"absolute",top:-10,right:-10,width:36,height:36,borderRadius:"50%",background:"rgba(0,0,0,0.75)",border:"1.5px solid rgba(255,255,255,0.25)",color:"#fff",fontSize:16,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(8px)"}}>✕</button>
             </div>
           </div>
         )}
